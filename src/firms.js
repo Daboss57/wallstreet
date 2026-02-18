@@ -112,7 +112,7 @@ router.post('/:id/invite', authenticate, async (req, res) => {
         const inviteId = uuid();
         await query('INSERT INTO firm_invitations (id, firm_id, inviter_id, invitee_username) VALUES ($1, $2, $3, $4)', [inviteId, firmId, req.user.id, username.toLowerCase()]);
 
-        res.json({ success: true, message: \`Invited \${username}\` });
+        res.json({ success: true, message: `Invited ${username}` });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -123,7 +123,7 @@ router.get('/invitations/me', authenticate, async (req, res) => {
     try {
         const user = await getOne('SELECT * FROM users WHERE id = $1', [req.user.id]);
         const invites = await getAll('SELECT * FROM firm_invitations WHERE invitee_username = $1 AND status = $2', [user.username, 'pending']);
-        
+
         const result = [];
         for (const i of invites) {
             const firm = await getOne('SELECT name FROM firms WHERE id = $1', [i.firm_id]);

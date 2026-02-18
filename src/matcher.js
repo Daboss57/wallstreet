@@ -47,7 +47,7 @@ async function matchAll() {
                         break;
                 }
             } catch (e) {
-                console.error(\`[Matcher] Error processing order \${order.id}:\`, e.message);
+                console.error(`[Matcher] Error processing order ${order.id}:`, e.message);
             }
         }
 
@@ -232,7 +232,7 @@ async function executeFill(order, qty, price, now) {
                 const currentShortQty = Math.abs(position.qty);
                 const newTotalShort = currentShortQty + qty;
                 const newAvg = ((currentShortQty * position.avg_cost) + (qty * price)) / newTotalShort;
-                
+
                 await query('UPDATE positions SET qty = $1, avg_cost = $2 WHERE id = $3', [newQty, newAvg, position.id]);
             } else {
                 await query(
@@ -319,7 +319,7 @@ async function checkMarginCalls(now) {
         // Need all positions for this user
         const allPositions = await getAll('SELECT * FROM positions WHERE user_id = $1', [userId]);
         let portfolioValue = user.cash;
-        
+
         for (const pos of allPositions) {
             const priceData = engine.getPrice(pos.ticker);
             if (priceData) {
@@ -337,7 +337,7 @@ async function checkMarginCalls(now) {
 
                 const pnl = (sp.avg_cost - coverPrice) * coverQty;
                 const newCash = user.cash - coverTotal;
-                
+
                 await query('UPDATE users SET cash = $1 WHERE id = $2', [+newCash.toFixed(2), user.id]);
                 await query('DELETE FROM positions WHERE id = $1', [sp.id]);
 

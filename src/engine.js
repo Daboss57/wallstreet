@@ -1,9 +1,13 @@
 const { v4: uuid } = require('uuid');
 const { batchUpsertCandles, batchUpsertPriceStates, getAll } = require('./db');
+// Matcher is required but not directly used in the sync loop to avoid circular ref issues or blocking
+// but we will use it via callbacks or dependency injection if needed.
+// However, the original code had require('./matcher');
 const matcher = require('./matcher');
+
 // ─── Ticker Definitions (30+ instruments across 7 asset classes) ───────────────
 const TICKERS = {
-    // ... [Same tickers as before] ...
+    // Stocks — Tech / Blue Chip
     AAPL: { name: 'Apricot Corp', class: 'Stock', sector: 'Tech', basePrice: 185, volatility: 0.018, drift: 0.0001, meanRev: 0.002 },
     MSFT: { name: 'MegaSoft', class: 'Stock', sector: 'Tech', basePrice: 420, volatility: 0.016, drift: 0.00012, meanRev: 0.002 },
     NVDA: { name: 'NeuraVolt', class: 'Stock', sector: 'Tech', basePrice: 875, volatility: 0.032, drift: 0.0002, meanRev: 0.0015 },

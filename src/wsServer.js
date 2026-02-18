@@ -205,14 +205,6 @@ async function broadcastOrderBooks() {
         }
     }
 
-    // We can run this in parallel for subscribed tickers? Or just sequential.
-    // Sequential DB calls might be slow if many tickers.
-    // But getOpenOrdersByTicker is just a SELECT.
-
-    // Optimization: Get ALL open orders once, then filter in memory?
-    // If we have 1000s of orders, in-memory filtering is faster than 100 DB calls.
-    // Let's stick to per-ticker for now unless it's too slow.
-
     try {
         for (const ticker of tickers) {
             const userOrders = await getAll("SELECT * FROM orders WHERE ticker = $1 AND status = 'open'", [ticker]);
