@@ -1,21 +1,89 @@
 const { Pool } = require('pg');
 const dns = require('dns');
+const util = require('util');
+const url = require('url');
 
-// Force IPv4 if available to avoid ENETUNREACH on dual-stack environments with bad routing
-if (dns.setDefaultResultOrder) {
-  dns.setDefaultResultOrder('ipv4first');
-}
+// Promisify dns.lookup
+const lookup = util.promisify(dns.lookup);
 
 const isProduction = process.env.NODE_ENV === 'production';
-const connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/streetos';
-const isLocal = connectionString.includes('localhost') || connectionString.includes('127.0.0.1');
+let connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/streetos';
 
-const pool = new Pool({
-  connectionString,
-  ssl: isLocal ? false : { rejectUnauthorized: false }
-});
+// Config state
+let pool = null;
+let poolInitPromise = null;
 
-// ─── Schema ────────────────────────────────────────────────────────────────────
+async function initializePool() {
+  try {
+    // Parse the connection string
+    // Handle cases where connectionString might not be a full URL (though standard libpq format is)
+    // If it's localhost, we don't need to resolve usually, but let's be consistent.
+
+    // Check if it's a URL
+    let dbUrl;
+    try {
+      dbUrl = new url.URL(connectionString);
+    } catch (e) {
+      // If not a URL, it might be a keyword string (host=... port=...) 
+      // In that case we can't easily parse and replace host without a real parser.
+      // But usually DATABASE_URL is a URI.
+      console.log('[DB] DATABASE_URL is not a standard URI, skipping IPv4 resolution hack.');
+      pool = new Pool({
+        connectionString,
+        ssl: isProduction ? { rejectUnauthorized: false } : false
+      });
+      return;
+    }
+
+    const hostname = dbUrl.hostname;
+
+    // If hostname is NOT an IP, try to resolve it to IPv4
+    const isIp = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname) || /^\[.*\]$/.test(hostname);
+
+    if (!isIp && hostname !== 'localhost') {
+      console.log(`[DB] Resolving ${hostname} to IPv4...`);
+      try {
+        const { address } = await lookup(hostname, { family: 4 });
+        console.log(`[DB] Resolved ${hostname} -> ${address}`);
+
+        // Construct config explicitly instead of modifying connectionString string to avoid malforming auth
+        const config = {
+          user: dbUrl.username,
+          password: dbUrl.password,
+          host: address,
+          port: dbUrl.port || 5432,
+          database: dbUrl.pathname.split('/')[1],
+          ssl: { rejectUnauthorized: false } // Force SSL for resolved cloud DBs
+        };
+
+        pool = new Pool(config);
+      } catch (e) {
+        console.error('[DB] DNS Resolution failed, falling back to original string:', e.message);
+        const isLocal = connectionString.includes('localhost') || connectionString.includes('127.0.0.1');
+        pool = new Pool({
+          connectionString,
+          ssl: isLocal ? false : { rejectUnauthorized: false }
+        });
+      }
+    } else {
+      const isLocal = connectionString.includes('localhost') || connectionString.includes('127.0.0.1');
+      pool = new Pool({
+        connectionString,
+        ssl: isLocal ? false : { rejectUnauthorized: false }
+      });
+    }
+
+  } catch (e) {
+    console.error('[DB] Fatal Init Error:', e);
+    // Fallback
+    pool = new Pool({ connectionString });
+  }
+}
+
+// Start Initialization
+poolInitPromise = initializePool();
+
+// Schema
 const schema = `
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
@@ -153,10 +221,18 @@ const schema = `
   CREATE INDEX IF NOT EXISTS idx_firm_invitations_invitee ON firm_invitations(invitee_username);
 `;
 
-// Initialize DB
+// Helper to ensure pool is ready
+async function ensurePool() {
+  if (!pool) await poolInitPromise;
+  if (!pool) throw new Error('Database pool failed to initialize');
+  return pool;
+}
+
+// Initialize Schema
 (async () => {
   try {
-    const client = await pool.connect();
+    const p = await ensurePool();
+    const client = await p.connect();
     try {
       await client.query(schema);
       console.log('[DB] PostgreSQL schema initialized');
@@ -164,28 +240,33 @@ const schema = `
       client.release();
     }
   } catch (e) {
-    // If we get an error here, it's likely connection/dns related
-    console.error('[DB] Init Error:', e.message);
+    console.error('[DB] Schema Init Error:', e.message);
   }
 })();
 
 // ─── Query Helpers ─────────────────────────────────────────────────────────────
-const query = (text, params) => pool.query(text, params);
+const query = async (text, params) => {
+  const p = await ensurePool();
+  return p.query(text, params);
+};
 
 const getOne = async (text, params) => {
-  const res = await pool.query(text, params);
+  const p = await ensurePool();
+  const res = await p.query(text, params);
   return res.rows[0];
 };
 
 const getAll = async (text, params) => {
-  const res = await pool.query(text, params);
+  const p = await ensurePool();
+  const res = await p.query(text, params);
   return res.rows;
 };
 
 // ─── Batch Operations ──────────────────────────────────────────────────────────
 const batchUpsertCandles = async (candles) => {
   if (candles.length === 0) return;
-  const client = await pool.connect();
+  const p = await ensurePool();
+  const client = await p.connect();
   try {
     await client.query('BEGIN');
     const text = `
@@ -211,7 +292,8 @@ const batchUpsertCandles = async (candles) => {
 
 const batchUpsertPriceStates = async (states) => {
   if (states.length === 0) return;
-  const client = await pool.connect();
+  const p = await ensurePool();
+  const client = await p.connect();
   try {
     await client.query('BEGIN');
     const text = `
@@ -238,4 +320,4 @@ const batchUpsertPriceStates = async (states) => {
   }
 };
 
-module.exports = { pool, query, getOne, getAll, batchUpsertCandles, batchUpsertPriceStates };
+module.exports = { query, getOne, getAll, batchUpsertCandles, batchUpsertPriceStates };
