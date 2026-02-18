@@ -1,4 +1,10 @@
 const { Pool } = require('pg');
+const dns = require('dns');
+
+// Force IPv4 if available to avoid ENETUNREACH on dual-stack environments with bad routing
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
 
 const isProduction = process.env.NODE_ENV === 'production';
 const connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/streetos';
@@ -158,6 +164,7 @@ const schema = `
       client.release();
     }
   } catch (e) {
+    // If we get an error here, it's likely connection/dns related
     console.error('[DB] Init Error:', e.message);
   }
 })();
