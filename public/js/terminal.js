@@ -76,10 +76,12 @@ const Terminal = {
             <a href="#/portfolio">Portfolio</a>
             <a href="#/leaderboard">Leaderboard</a>
             <a href="#/news">News</a>
+            <a href="#/firms">Firms</a>
           </nav>
           <div class="header-balance">
             <span class="balance-label">Balance</span>
             <span class="balance-value" id="header-cash">${Utils.money(user.cash || 100000)}</span>
+             <button title="Reset Account" onclick="App.resetAccount()" style="background:none;border:none;cursor:pointer;font-size:1.2rem;margin-left:5px;">🔄</button>
           </div>
           <div class="header-user">
             <div class="user-avatar">${(user.username || 'U')[0].toUpperCase()}</div>

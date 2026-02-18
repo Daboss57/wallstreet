@@ -128,6 +128,38 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_candles_lookup ON candles(ticker, interval, open_time);
   CREATE INDEX IF NOT EXISTS idx_news_ticker ON news_events(ticker);
   CREATE INDEX IF NOT EXISTS idx_snapshots_user ON portfolio_snapshots(user_id, snapshot_at);
+  CREATE TABLE IF NOT EXISTS firm_invitations (
+    id TEXT PRIMARY KEY,
+    firm_id TEXT NOT NULL,
+    inviter_id TEXT NOT NULL,
+    invitee_username TEXT NOT NULL, -- Invited by username, resolved on accept
+    status TEXT NOT NULL DEFAULT 'pending', -- pending, accepted, rejected
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+    FOREIGN KEY (firm_id) REFERENCES firms(id),
+    FOREIGN KEY (inviter_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS firms (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    owner_id TEXT NOT NULL,
+    description TEXT,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+    FOREIGN KEY (owner_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS firm_members (
+    firm_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member', -- member, analyst, manager
+    joined_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+    PRIMARY KEY (firm_id, user_id),
+    FOREIGN KEY (firm_id) REFERENCES firms(id),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+  
+  CREATE INDEX IF NOT EXISTS idx_firm_members_user ON firm_members(user_id);
+  CREATE INDEX IF NOT EXISTS idx_firm_invitations_invitee ON firm_invitations(invitee_username);
 `);
 
 // ─── Prepared Statements ───────────────────────────────────────────────────────

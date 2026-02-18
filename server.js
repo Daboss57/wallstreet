@@ -9,6 +9,7 @@ const apiRouter = require('./src/api');
 const engine = require('./src/engine');
 const news = require('./src/news');
 const wsServer = require('./src/wsServer');
+const firmsRouter = require('./src/firms');
 
 const app = express();
 const server = http.createServer(app);
@@ -28,6 +29,7 @@ app.use((req, res, next) => {
 
 // ─── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api', apiRouter);
+app.use('/api/firms', firmsRouter);
 
 // ─── SPA Fallback ──────────────────────────────────────────────────────────────
 app.get('*', (req, res) => {

@@ -26,6 +26,23 @@ router.post('/auth/login', (req, res) => {
     }
 });
 
+router.post('/auth/reset', authenticate, (req, res) => {
+    try {
+        // Transaction for atomicity
+        const resetTx = stmts.db.transaction(() => {
+            stmts.resetUserCash.run(req.user.id);
+            stmts.deleteAllUserPositions.run(req.user.id);
+            stmts.deleteAllUserOrders.run(req.user.id);
+            stmts.deleteAllUserTrades.run(req.user.id);
+            stmts.deleteAllUserSnapshots.run(req.user.id);
+        });
+        resetTx();
+        res.json({ success: true, message: 'Account reset successfully' });
+    } catch (e) {
+        res.status(500).json({ error: 'Failed to reset account: ' + e.message });
+    }
+});
+
 router.get('/me', authenticate, (req, res) => {
     const user = stmts.getUserById.get(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -151,6 +168,34 @@ router.delete('/orders/:id', authenticate, (req, res) => {
 
     stmts.cancelOrder.run(Date.now(), req.params.id);
     res.json({ success: true });
+});
+
+
+
+router.put('/orders/:id', authenticate, (req, res) => {
+    const { id } = req.params;
+    const { price, stopPrice } = req.body; // Only allow updating price/stopPrice for now
+
+    const order = stmts.getOrderById.get(id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (order.user_id !== req.user.id) return res.status(403).json({ error: 'Not your order' });
+    if (order.status !== 'open') return res.status(400).json({ error: 'Order is not open' });
+
+    // We can't easily change "type" or "qty" without complex validation, 
+    // so we'll stick to price updates for drag-and-drop.
+
+    // In a real system, you'd cancel and replace, but for simplicity we'll update in place if possible
+    // or just re-validate.
+
+    try {
+        const updateStmt = stmts.db.prepare(`UPDATE orders SET limit_price = ?, stop_price = ? WHERE id = ?`);
+        updateStmt.run(price || order.limit_price, stopPrice || order.stop_price, id);
+
+        const updatedOrder = stmts.getOrderById.get(id);
+        res.json({ success: true, order: updatedOrder });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 router.get('/orders', authenticate, (req, res) => {
