@@ -181,11 +181,11 @@ router.post('/orders', authenticate, async (req, res) => {
         const now = Date.now();
 
         await query(
-            \`INSERT INTO orders (id, user_id, ticker, type, side, qty, limit_price, stop_price, trail_pct, trail_high, status, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', $11)\`,
+            `INSERT INTO orders (id, user_id, ticker, type, side, qty, limit_price, stop_price, trail_pct, trail_high, status, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', $11)`,
             [orderId, req.user.id, ticker, type, side, qty, limitPrice, stopPrice, trailPct, type === 'trailing-stop' ? currentPrice : null, now]
         );
-        
+
         // If Market Order, execute immediately (simplified synchronous execution inside the request)
         if (type === 'market') {
             const fillPrice = currentPrice; // In real engine, would walk order book
@@ -194,7 +194,7 @@ router.post('/orders', authenticate, async (req, res) => {
             // But here we are doing it "inline" for simplicity or needing to refactor the logic from `matcher.js`?
             // The original code likely had `engine` or `matcher` handle checks.
             // Let's defer to a separate function or keeping it simple:
-            
+
             // For now, let's just save order and let the "Matcher" loop pick it up?
             // Wait, the previous architecture had `matcher.js`. I need to verify if I need to call it.
             // The user's prompt implies preserving functionality. 
@@ -205,12 +205,12 @@ router.post('/orders', authenticate, async (req, res) => {
         }
 
         await query('COMMIT');
-        
+
         // Notify matcher (if event driven) or just return success
         // In this implementation, we will follow the "polling" or "tick" approach of the matcher?
         // Or if the matcher is event-based.
         // Let's assume we return success and the background matcher picks it up.
-        
+
         res.json({ success: true, orderId });
     } catch (e) {
         await query('ROLLBACK');
@@ -222,7 +222,7 @@ router.post('/orders', authenticate, async (req, res) => {
 router.put('/orders/:id', authenticate, async (req, res) => {
     const { id } = req.params;
     const { price, stopPrice } = req.body;
-    
+
     try {
         const order = await getOne('SELECT * FROM orders WHERE id = $1', [id]);
         if (!order) return res.status(404).json({ error: 'Order not found' });
@@ -231,13 +231,13 @@ router.put('/orders/:id', authenticate, async (req, res) => {
 
         // Update fields
         if (price !== undefined) {
-             // If manual update of limit price
-             await query('UPDATE orders SET limit_price = $1 WHERE id = $2', [price, id]);
+            // If manual update of limit price
+            await query('UPDATE orders SET limit_price = $1 WHERE id = $2', [price, id]);
         }
         if (stopPrice !== undefined) {
-             await query('UPDATE orders SET stop_price = $1 WHERE id = $2', [stopPrice, id]);
+            await query('UPDATE orders SET stop_price = $1 WHERE id = $2', [stopPrice, id]);
         }
-        
+
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -250,7 +250,7 @@ router.delete('/orders/:id', authenticate, async (req, res) => {
         const order = await getOne('SELECT * FROM orders WHERE id = $1', [req.params.id]);
         if (!order) return res.status(404).json({ error: 'Order not found' });
         if (order.user_id !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-        
+
         await query("UPDATE orders SET status = 'cancelled', cancelled_at = $1 WHERE id = $2", [Date.now(), req.params.id]);
         res.json({ success: true });
     } catch (e) {
