@@ -381,8 +381,8 @@ select {
 .auth-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.7);
-  backdrop-filter: blur(8px);
+  background: rgba(0, 0, 0, 0.85);
+  /* backdrop-filter: blur(8px); Removed for performance */
   z-index: 1000;
   display: flex;
   align-items: center;
