@@ -10,7 +10,7 @@ const pool = new Pool({
 });
 
 // ─── Schema ────────────────────────────────────────────────────────────────────
-const schema = \`
+const schema = `
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     username TEXT UNIQUE NOT NULL,
@@ -145,43 +145,43 @@ const schema = \`
   CREATE INDEX IF NOT EXISTS idx_snapshots_user ON portfolio_snapshots(user_id, snapshot_at);
   CREATE INDEX IF NOT EXISTS idx_firm_members_user ON firm_members(user_id);
   CREATE INDEX IF NOT EXISTS idx_firm_invitations_invitee ON firm_invitations(invitee_username);
-\`;
+`;
 
 // Initialize DB
 (async () => {
+  try {
+    const client = await pool.connect();
     try {
-        const client = await pool.connect();
-        try {
-            await client.query(schema);
-            console.log('[DB] PostgreSQL schema initialized');
-        } finally {
-            client.release();
-        }
-    } catch (e) {
-        console.error('[DB] Init Error:', e.message);
+      await client.query(schema);
+      console.log('[DB] PostgreSQL schema initialized');
+    } finally {
+      client.release();
     }
+  } catch (e) {
+    console.error('[DB] Init Error:', e.message);
+  }
 })();
 
 // ─── Query Helpers ─────────────────────────────────────────────────────────────
 const query = (text, params) => pool.query(text, params);
 
 const getOne = async (text, params) => {
-    const res = await pool.query(text, params);
-    return res.rows[0];
+  const res = await pool.query(text, params);
+  return res.rows[0];
 };
 
 const getAll = async (text, params) => {
-    const res = await pool.query(text, params);
-    return res.rows;
+  const res = await pool.query(text, params);
+  return res.rows;
 };
 
 // ─── Batch Operations ──────────────────────────────────────────────────────────
 const batchUpsertCandles = async (candles) => {
-    if (candles.length === 0) return;
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        const text = \`
+  if (candles.length === 0) return;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const text = `
       INSERT INTO candles (ticker, interval, open_time, open, high, low, close, volume)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       ON CONFLICT (ticker, interval, open_time) DO UPDATE SET
@@ -189,25 +189,25 @@ const batchUpsertCandles = async (candles) => {
         low = LEAST(candles.low, EXCLUDED.low),
         close = EXCLUDED.close,
         volume = candles.volume + EXCLUDED.volume
-    \`;
-        for (const c of candles) {
-            await client.query(text, [c.ticker, c.interval, c.openTime, c.open, c.high, c.low, c.close, c.volume]);
-        }
-        await client.query('COMMIT');
-    } catch (e) {
-        await client.query('ROLLBACK');
-        console.error('Batch Candle Error:', e.message);
-    } finally {
-        client.release();
+    `;
+    for (const c of candles) {
+      await client.query(text, [c.ticker, c.interval, c.openTime, c.open, c.high, c.low, c.close, c.volume]);
     }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('Batch Candle Error:', e.message);
+  } finally {
+    client.release();
+  }
 };
 
 const batchUpsertPriceStates = async (states) => {
-    if (states.length === 0) return;
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        const text = \`
+  if (states.length === 0) return;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const text = `
       INSERT INTO price_state (ticker, price, bid, ask, open, high, low, prev_close, volume, volatility, updated_at)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       ON CONFLICT (ticker) DO UPDATE SET
@@ -215,20 +215,20 @@ const batchUpsertPriceStates = async (states) => {
         open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
         prev_close = EXCLUDED.prev_close, volume = EXCLUDED.volume,
         volatility = EXCLUDED.volatility, updated_at = EXCLUDED.updated_at
-    \`;
-        for (const s of states) {
-            await client.query(text, [
-                s.ticker, s.price, s.bid, s.ask, s.open, s.high, s.low,
-                s.prevClose, s.volume, s.volatility, s.updatedAt
-            ]);
-        }
-        await client.query('COMMIT');
-    } catch (e) {
-        await client.query('ROLLBACK');
-        console.error('Batch Price State Error:', e.message);
-    } finally {
-        client.release();
+    `;
+    for (const s of states) {
+      await client.query(text, [
+        s.ticker, s.price, s.bid, s.ask, s.open, s.high, s.low,
+        s.prevClose, s.volume, s.volatility, s.updatedAt
+      ]);
     }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('Batch Price State Error:', e.message);
+  } finally {
+    client.release();
+  }
 };
 
 module.exports = { pool, query, getOne, getAll, batchUpsertCandles, batchUpsertPriceStates };
