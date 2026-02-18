@@ -3,7 +3,7 @@ const { verifyToken } = require('./auth');
 const engine = require('./engine');
 const orderbook = require('./orderbook');
 const matcher = require('./matcher');
-const { stmts } = require('./db');
+const { getAll, getOne } = require('./db');
 
 // ─── WebSocket Server ──────────────────────────────────────────────────────────
 // Ultra low latency: direct message buffering, per-ticker subscription, binary-ready
@@ -25,12 +25,13 @@ function init(server) {
         ws.isAlive = true;
         ws.on('pong', () => { ws.isAlive = true; });
 
-        ws.on('message', (data) => {
+        ws.on('message', async (data) => {
             try {
                 const msg = JSON.parse(data);
-                handleMessage(ws, clientState, msg);
+                await handleMessage(ws, clientState, msg);
             } catch (e) {
-                sendJSON(ws, { type: 'error', message: 'Invalid JSON' });
+                console.error('WS Message Error:', e);
+                sendJSON(ws, { type: 'error', message: 'Invalid request' });
             }
         });
 
@@ -81,13 +82,14 @@ function init(server) {
         }
 
         // Run order matching every tick
-        matcher.matchAll();
+        // matchAll is async, we call it without await to not block tick loop, but catch errors
+        matcher.matchAll().catch(e => console.error('Matcher Error:', e));
 
         // Send order book updates every 2nd tick for subscribed tickers
         if (engine.TICKER_LIST._tickBookCounter === undefined) engine.TICKER_LIST._tickBookCounter = 0;
         engine.TICKER_LIST._tickBookCounter++;
         if (engine.TICKER_LIST._tickBookCounter % 2 === 0) {
-            broadcastOrderBooks();
+            broadcastOrderBooks().catch(e => console.error('Orderbook Broadcast Error:', e));
         }
     });
 
@@ -97,13 +99,13 @@ function init(server) {
     });
 
     // ── Hook into matcher for fill broadcasts ──
-    matcher.setFillCallback((userId, fill) => {
+    matcher.setFillCallback(async (userId, fill) => {
         for (const [ws, state] of clients) {
             if (ws.readyState !== WebSocket.OPEN) continue;
             if (state.userId === userId) {
                 sendJSON(ws, fill);
                 // Also send updated positions and cash
-                sendPortfolioUpdate(ws, userId);
+                await sendPortfolioUpdate(ws, userId);
             }
         }
     });
@@ -112,7 +114,7 @@ function init(server) {
     return wss;
 }
 
-function handleMessage(ws, state, msg) {
+async function handleMessage(ws, state, msg) {
     switch (msg.type) {
         case 'auth': {
             const decoded = verifyToken(msg.token);
@@ -128,7 +130,7 @@ function handleMessage(ws, state, msg) {
             sendJSON(ws, { type: 'authenticated', username: decoded.username });
 
             // Send initial portfolio state
-            sendPortfolioUpdate(ws, decoded.id);
+            await sendPortfolioUpdate(ws, decoded.id);
             break;
         }
         case 'subscribe': {
@@ -159,56 +161,72 @@ function handleMessage(ws, state, msg) {
     }
 }
 
-function sendPortfolioUpdate(ws, userId) {
-    const user = stmts.getUserById.get(userId);
-    if (!user) return;
+async function sendPortfolioUpdate(ws, userId) {
+    try {
+        const user = await getOne('SELECT * FROM users WHERE id = $1', [userId]);
+        if (!user) return;
 
-    const positions = stmts.getUserPositions.all(userId);
-    const enriched = positions.map(p => {
-        const priceData = engine.getPrice(p.ticker);
-        const currentPrice = priceData?.price || p.avg_cost;
-        const marketValue = p.qty * currentPrice;
-        const unrealizedPnl = marketValue - p.qty * p.avg_cost;
-        return {
-            ...p, currentPrice, marketValue: +marketValue.toFixed(2),
-            unrealizedPnl: +unrealizedPnl.toFixed(2),
-            pnlPct: p.avg_cost ? +(((currentPrice - p.avg_cost) / p.avg_cost) * 100).toFixed(2) : 0
-        };
-    });
+        const positions = await getAll('SELECT * FROM positions WHERE user_id = $1', [userId]);
+        const enriched = positions.map(p => {
+            const priceData = engine.getPrice(p.ticker);
+            const currentPrice = priceData?.price || p.avg_cost;
+            const marketValue = p.qty * currentPrice;
+            const unrealizedPnl = marketValue - p.qty * p.avg_cost;
+            return {
+                ...p, currentPrice: +currentPrice.toFixed(2), marketValue: +marketValue.toFixed(2),
+                unrealizedPnl: +unrealizedPnl.toFixed(2),
+                pnlPct: p.avg_cost ? +(((currentPrice - p.avg_cost) / p.avg_cost) * 100).toFixed(2) : 0
+            };
+        });
 
-    const openOrders = stmts.getOpenOrders.all(userId);
+        const openOrders = await getAll("SELECT * FROM orders WHERE user_id = $1 AND status = 'open'", [userId]);
 
-    sendJSON(ws, {
-        type: 'portfolio',
-        cash: user.cash,
-        positions: enriched,
-        openOrders
-    });
+        sendJSON(ws, {
+            type: 'portfolio',
+            cash: user.cash,
+            positions: enriched,
+            openOrders
+        });
+    } catch (e) {
+        console.error('Portfolio Update Error:', e);
+    }
 }
 
-function broadcastOrderBooks() {
+async function broadcastOrderBooks() {
     // Collect unique subscribed tickers
     const tickers = new Set();
     for (const [ws, state] of clients) {
         if (ws.readyState !== WebSocket.OPEN || !state.authenticated) continue;
         if (state.subscriptions.has('all')) {
-            // Only send top-5 most popular tickers
+            // Only send top-10 most popular tickers for 'all' to save bandwidth
             engine.TICKER_LIST.slice(0, 10).forEach(t => tickers.add(t));
         } else {
             state.subscriptions.forEach(t => tickers.add(t));
         }
     }
 
-    for (const ticker of tickers) {
-        const userOrders = stmts.getOpenOrdersByTicker.all(ticker);
-        const book = orderbook.generateBook(ticker, userOrders);
+    // We can run this in parallel for subscribed tickers? Or just sequential.
+    // Sequential DB calls might be slow if many tickers.
+    // But getOpenOrdersByTicker is just a SELECT.
 
-        for (const [ws, state] of clients) {
-            if (ws.readyState !== WebSocket.OPEN || !state.authenticated) continue;
-            if (state.subscriptions.has(ticker) || state.subscriptions.has('all')) {
-                sendJSON(ws, { type: 'orderbook', data: book });
+    // Optimization: Get ALL open orders once, then filter in memory?
+    // If we have 1000s of orders, in-memory filtering is faster than 100 DB calls.
+    // Let's stick to per-ticker for now unless it's too slow.
+
+    try {
+        for (const ticker of tickers) {
+            const userOrders = await getAll("SELECT * FROM orders WHERE ticker = $1 AND status = 'open'", [ticker]);
+            const book = orderbook.generateBook(ticker, userOrders);
+
+            for (const [ws, state] of clients) {
+                if (ws.readyState !== WebSocket.OPEN || !state.authenticated) continue;
+                if (state.subscriptions.has(ticker) || state.subscriptions.has('all')) {
+                    sendJSON(ws, { type: 'orderbook', data: book });
+                }
             }
         }
+    } catch (e) {
+        console.error('Broadcast Orderbook Error:', e);
     }
 }
 
@@ -216,14 +234,14 @@ function broadcast(msg) {
     const payload = JSON.stringify(msg);
     for (const [ws, state] of clients) {
         if (ws.readyState === WebSocket.OPEN && state.authenticated) {
-            ws.send(payload);
+            try { ws.send(payload); } catch (e) { }
         }
     }
 }
 
 function sendJSON(ws, obj) {
     if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(obj));
+        try { ws.send(JSON.stringify(obj)); } catch (e) { }
     }
 }
 

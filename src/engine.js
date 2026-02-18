@@ -1,9 +1,9 @@
 const { v4: uuid } = require('uuid');
-const { stmts, batchUpsertCandles, batchUpsertPriceStates } = require('./db');
-
+const { batchUpsertCandles, batchUpsertPriceStates, getAll } = require('./db');
+const matcher = require('./matcher');
 // ─── Ticker Definitions (30+ instruments across 7 asset classes) ───────────────
 const TICKERS = {
-    // Stocks — Large Cap
+    // ... [Same tickers as before] ...
     AAPL: { name: 'Apricot Corp', class: 'Stock', sector: 'Tech', basePrice: 185, volatility: 0.018, drift: 0.0001, meanRev: 0.002 },
     MSFT: { name: 'MegaSoft', class: 'Stock', sector: 'Tech', basePrice: 420, volatility: 0.016, drift: 0.00012, meanRev: 0.002 },
     NVDA: { name: 'NeuraVolt', class: 'Stock', sector: 'Tech', basePrice: 875, volatility: 0.032, drift: 0.0002, meanRev: 0.0015 },
@@ -67,9 +67,13 @@ function gaussianRandom() {
 }
 
 // ─── Initialize prices ────────────────────────────────────────────────────────
-function initPrices() {
+async function initPrices() {
     // Try to restore from DB
-    const saved = stmts.getAllPriceStates.all();
+    let saved = [];
+    try {
+        saved = await getAll('SELECT * FROM price_state');
+    } catch (e) { console.error('Error loading price states:', e.message); }
+
     const savedMap = {};
     for (const s of saved) savedMap[s.ticker] = s;
 
@@ -230,14 +234,10 @@ function tick() {
 
     // Batch save to DB every 5 ticks for performance
     if (tickCount % 5 === 0) {
-        try {
-            if (candlesToSave.length > 0) batchUpsertCandles(candlesToSave);
-            batchUpsertPriceStates(priceStates);
-        } catch (e) {
-            console.error('DB save error:', e.message);
-        }
+        if (candlesToSave.length > 0) batchUpsertCandles(candlesToSave).catch(e => console.error(e));
+        batchUpsertPriceStates(priceStates).catch(e => console.error(e));
     } else if (candlesToSave.length > 0) {
-        try { batchUpsertCandles(candlesToSave); } catch (e) { console.error('Candle save error:', e.message); }
+        batchUpsertCandles(candlesToSave).catch(e => console.error(e));
     }
 
     // Broadcast ticks

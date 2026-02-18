@@ -1,5 +1,5 @@
 const { v4: uuid } = require('uuid');
-const { stmts } = require('./db');
+const { query } = require('./db');
 const engine = require('./engine');
 
 // ─── News Templates ────────────────────────────────────────────────────────────
@@ -222,7 +222,9 @@ function generateEvent() {
     };
 
     try {
-        stmts.insertNews.run(eventId, event.ticker, event.type, headline, body, event.priceImpact, event.severity, now);
+        query('INSERT INTO news_events (id, ticker, type, headline, body, price_impact, severity, fired_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+            [eventId, event.ticker, event.type, headline, body, event.priceImpact, event.severity, now]
+        ).catch(e => console.error('News save error:', e.message));
     } catch (e) {
         console.error('News save error:', e.message);
     }
