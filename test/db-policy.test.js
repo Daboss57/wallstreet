@@ -29,6 +29,11 @@ test('chooseModeAfterFailure falls back to pooler on connectivity failures', () 
     assert.equal(fallbackMode, 'pooler');
 });
 
+test('isConnectivityError recognizes TLS certificate chain failures', () => {
+    assert.equal(isConnectivityError({ code: 'SELF_SIGNED_CERT_IN_CHAIN' }), true);
+    assert.equal(isConnectivityError({ message: 'self-signed certificate in certificate chain' }), true);
+});
+
 test('nextRetryDelay honors max cap', () => {
     assert.equal(nextRetryDelay(250, 5000), 500);
     assert.equal(nextRetryDelay(4000, 5000), 5000);

@@ -6,6 +6,11 @@ const CONNECTIVITY_ERROR_CODES = new Set([
     'ECONNREFUSED',
     'ETIMEDOUT',
     'ECONNABORTED',
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'CERT_HAS_EXPIRED',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
     '08001',
     '08006',
     '57P01',
@@ -16,6 +21,9 @@ const CONNECTIVITY_ERROR_PATTERNS = [
     'connection terminated unexpectedly',
     'timeout expired',
     'could not connect to server',
+    'self-signed certificate in certificate chain',
+    'unable to verify the first certificate',
+    'certificate has expired',
 ];
 
 function isConnectivityError(error) {

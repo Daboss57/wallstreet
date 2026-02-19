@@ -22,6 +22,10 @@ const DB_RETRY_BASE_MS = parseIntOr(process.env.DB_RETRY_BASE_MS, 250);
 const DB_RETRY_MAX_MS = parseIntOr(process.env.DB_RETRY_MAX_MS, 5000);
 const DB_POOL_MAX = parseIntOr(process.env.DB_POOL_MAX, 10);
 const DB_DIRECT_RETRY_COOLDOWN_MS = parseIntOr(process.env.DB_DIRECT_RETRY_COOLDOWN_MS, 60000);
+const DB_SSL_REJECT_UNAUTHORIZED = parseBool(process.env.DB_SSL_REJECT_UNAUTHORIZED, true);
+const DB_SSL_DISABLED = parseBool(process.env.DB_SSL_DISABLED, false);
+const DB_SSL_CA = process.env.DB_SSL_CA || '';
+const DB_SSL_CA_BASE64 = process.env.DB_SSL_CA_BASE64 || '';
 
 const listeners = new Set();
 const pools = {
@@ -122,12 +126,27 @@ function isDbHealthy() {
 function createPool(mode) {
     const connectionString = getUrlForMode(mode);
     if (!connectionString) return null;
+
+    let ssl = false;
+    if (!DB_SSL_DISABLED) {
+        ssl = { rejectUnauthorized: DB_SSL_REJECT_UNAUTHORIZED };
+        if (DB_SSL_CA) {
+            ssl.ca = DB_SSL_CA;
+        } else if (DB_SSL_CA_BASE64) {
+            try {
+                ssl.ca = Buffer.from(DB_SSL_CA_BASE64, 'base64').toString('utf8');
+            } catch (error) {
+                console.warn('[DB] Invalid DB_SSL_CA_BASE64 value; ignoring custom CA');
+            }
+        }
+    }
+
     return new Pool({
         connectionString,
         max: DB_POOL_MAX,
         connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
         idleTimeoutMillis: 30000,
-        ssl: { rejectUnauthorized: true },
+        ssl,
         keepAlive: true,
     });
 }
