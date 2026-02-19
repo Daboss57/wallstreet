@@ -383,4 +383,248 @@ router.get('/portfolio/stats', authenticate, asyncRoute(async (req, res) => {
     });
 }));
 
+// ============================================================
+// FUND HELPERS
+// ============================================================
+
+async function getFundWithMembership(fundId, userId) {
+    const fund = await stmts.getFundById.get(fundId);
+    if (!fund) return { fund: null, membership: null };
+    const membership = await stmts.getFundMember.get(fundId, userId);
+    return { fund, membership };
+}
+
+function requireFundMember(req, res, next) {
+    (async () => {
+        const { id } = req.params;
+        const { fund, membership } = await getFundWithMembership(id, req.user.id);
+        if (!fund) return res.status(404).json({ error: 'Fund not found' });
+        if (!membership) return res.status(403).json({ error: 'Not a member of this fund' });
+        req.fund = fund;
+        req.membership = membership;
+        next();
+    })().catch(next);
+}
+
+function requireFundOwner(req, res, next) {
+    (async () => {
+        const { id } = req.params;
+        const { fund, membership } = await getFundWithMembership(id, req.user.id);
+        if (!fund) return res.status(404).json({ error: 'Fund not found' });
+        if (!membership || membership.role !== 'owner') {
+            return res.status(403).json({ error: 'Owner access required' });
+        }
+        req.fund = fund;
+        req.membership = membership;
+        next();
+    })().catch(next);
+}
+
+// ============================================================
+// FUND ENDPOINTS
+// ============================================================
+
+// Create a new fund (auth required)
+router.post('/funds', authenticate, asyncRoute(async (req, res) => {
+    const { name, strategy_type, description, min_investment, management_fee, performance_fee } = req.body;
+
+    if (!name || !strategy_type) {
+        return res.status(400).json({ error: 'Missing required fields: name, strategy_type' });
+    }
+
+    const fundId = uuid();
+    const now = Date.now();
+
+    await stmts.insertFund.run(
+        fundId,
+        name,
+        req.user.id,
+        strategy_type,
+        description || null,
+        min_investment || 0,
+        management_fee || 0,
+        performance_fee || 0,
+        now
+    );
+
+    // Auto-add creator as owner
+    const memberId = uuid();
+    await stmts.insertFundMember.run(memberId, fundId, req.user.id, 'owner', now);
+
+    const fund = await stmts.getFundById.get(fundId);
+    res.status(201).json({ success: true, fund });
+}));
+
+// List all funds (public)
+router.get('/funds', asyncRoute(async (req, res) => {
+    const funds = await stmts.getAllFunds.all();
+    res.json(funds);
+}));
+
+// Get fund details (public)
+router.get('/funds/:id', asyncRoute(async (req, res) => {
+    const fund = await stmts.getFundById.get(req.params.id);
+    if (!fund) return res.status(404).json({ error: 'Fund not found' });
+    res.json(fund);
+}));
+
+// Get funds user owns or is member of (auth required)
+router.get('/funds/my', authenticate, asyncRoute(async (req, res) => {
+    const funds = await stmts.getUserFunds.all(req.user.id);
+    res.json(funds);
+}));
+
+// Update fund (owner only)
+router.put('/funds/:id', authenticate, requireFundOwner, asyncRoute(async (req, res) => {
+    const { name, strategy_type, description, min_investment, management_fee, performance_fee } = req.body;
+
+    await stmts.updateFund.run(
+        name || req.fund.name,
+        strategy_type || req.fund.strategy_type,
+        description !== undefined ? description : req.fund.description,
+        min_investment !== undefined ? min_investment : req.fund.min_investment,
+        management_fee !== undefined ? management_fee : req.fund.management_fee,
+        performance_fee !== undefined ? performance_fee : req.fund.performance_fee,
+        req.params.id
+    );
+
+    const fund = await stmts.getFundById.get(req.params.id);
+    res.json({ success: true, fund });
+}));
+
+// Delete fund (owner only)
+router.delete('/funds/:id', authenticate, requireFundOwner, asyncRoute(async (req, res) => {
+    await stmts.deleteFund.run(req.params.id);
+    res.json({ success: true });
+}));
+
+// ============================================================
+// FUND MEMBER ENDPOINTS
+// ============================================================
+
+// Add member to fund (owner/analyst only)
+router.post('/funds/:id/members', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+    const { role } = req.membership;
+
+    if (role !== 'owner' && role !== 'analyst') {
+        return res.status(403).json({ error: 'Only owners and analysts can add members' });
+    }
+
+    const { user_id, role: newRole } = req.body;
+
+    if (!user_id || !newRole) {
+        return res.status(400).json({ error: 'Missing required fields: user_id, role' });
+    }
+
+    const validRoles = ['analyst', 'client'];
+    if (!validRoles.includes(newRole)) {
+        return res.status(400).json({ error: `Invalid role. Must be: ${validRoles.join(', ')}` });
+    }
+
+    // Check if already a member
+    const existing = await stmts.getFundMember.get(req.params.id, user_id);
+    if (existing) {
+        return res.status(400).json({ error: 'User is already a member of this fund' });
+    }
+
+    const memberId = uuid();
+    await stmts.insertFundMember.run(memberId, req.params.id, user_id, newRole, Date.now());
+
+    const members = await stmts.getFundMembers.all(req.params.id);
+    const newMember = members.find(m => m.user_id === user_id);
+    res.status(201).json({ success: true, member: newMember });
+}));
+
+// List fund members (fund members only)
+router.get('/funds/:id/members', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+    const members = await stmts.getFundMembers.all(req.params.id);
+    res.json(members);
+}));
+
+// Update member role (owner only)
+router.put('/funds/:id/members/:userId', authenticate, requireFundOwner, asyncRoute(async (req, res) => {
+    const { userId } = req.params;
+    const { role } = req.body;
+
+    if (!role) {
+        return res.status(400).json({ error: 'Missing required field: role' });
+    }
+
+    const membership = await stmts.getFundMember.get(req.params.id, userId);
+    if (!membership) {
+        return res.status(404).json({ error: 'Member not found' });
+    }
+
+    if (membership.role === 'owner') {
+        return res.status(400).json({ error: 'Cannot modify owner role' });
+    }
+
+    const validRoles = ['analyst', 'client'];
+    if (!validRoles.includes(role)) {
+        return res.status(400).json({ error: `Invalid role. Must be: ${validRoles.join(', ')}` });
+    }
+
+    await stmts.updateFundMemberRole.run(role, req.params.id, userId);
+    const members = await stmts.getFundMembers.all(req.params.id);
+    const updatedMember = members.find(m => m.user_id === userId);
+    res.json({ success: true, member: updatedMember });
+}));
+
+// Remove member (owner only)
+router.delete('/funds/:id/members/:userId', authenticate, requireFundOwner, asyncRoute(async (req, res) => {
+    const { userId } = req.params;
+
+    const membership = await stmts.getFundMember.get(req.params.id, userId);
+    if (!membership) {
+        return res.status(404).json({ error: 'Member not found' });
+    }
+
+    if (membership.role === 'owner') {
+        return res.status(400).json({ error: 'Cannot remove owner' });
+    }
+
+    await stmts.deleteFundMember.run(req.params.id, userId);
+    res.json({ success: true });
+}));
+
+// ============================================================
+// FUND CAPITAL ENDPOINTS
+// ============================================================
+
+// Deposit/withdraw capital (auth required)
+router.post('/funds/:id/capital', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+    const { amount, type } = req.body;
+
+    if (!amount || !type) {
+        return res.status(400).json({ error: 'Missing required fields: amount, type' });
+    }
+
+    if (amount <= 0) {
+        return res.status(400).json({ error: 'Amount must be positive' });
+    }
+
+    const validTypes = ['deposit', 'withdrawal'];
+    if (!validTypes.includes(type)) {
+        return res.status(400).json({ error: `Invalid type. Must be: ${validTypes.join(', ')}` });
+    }
+
+    const capitalId = uuid();
+    await stmts.insertFundCapital.run(capitalId, req.params.id, req.user.id, amount, type, Date.now());
+
+    const transaction = await stmts.getFundCapitalById.get(capitalId);
+    res.status(201).json({ success: true, transaction });
+}));
+
+// Get capital transactions (fund members only)
+router.get('/funds/:id/capital', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+    const transactions = await stmts.getFundCapitalTransactions.all(req.params.id);
+    res.json(transactions);
+}));
+
+// Get capital summary by user (fund members only)
+router.get('/funds/:id/capital/summary', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+    const summary = await stmts.getFundCapitalSummary.all(req.params.id, 'deposit');
+    res.json(summary);
+}));
+
 module.exports = router;
