@@ -140,6 +140,27 @@ CREATE TABLE IF NOT EXISTS fund_capital (
   created_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
 );
 
+CREATE TABLE IF NOT EXISTS strategies (
+  id BIGSERIAL PRIMARY KEY,
+  fund_id TEXT NOT NULL REFERENCES funds(id),
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  config JSONB,
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  created_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint),
+  updated_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
+);
+
+CREATE TABLE IF NOT EXISTS strategy_trades (
+  id BIGSERIAL PRIMARY KEY,
+  strategy_id BIGINT NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  ticker TEXT NOT NULL,
+  side TEXT NOT NULL,
+  quantity INTEGER NOT NULL,
+  price INTEGER NOT NULL,
+  executed_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
+);
+
 CREATE INDEX IF NOT EXISTS idx_positions_user ON positions(user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_ticker_status ON orders(ticker, status);
@@ -152,6 +173,10 @@ CREATE INDEX IF NOT EXISTS idx_fund_members_fund ON fund_members(fund_id);
 CREATE INDEX IF NOT EXISTS idx_fund_members_user ON fund_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_fund_capital_fund ON fund_capital(fund_id);
 CREATE INDEX IF NOT EXISTS idx_fund_capital_user ON fund_capital(user_id, fund_id);
+CREATE INDEX IF NOT EXISTS idx_strategies_fund ON strategies(fund_id);
+CREATE INDEX IF NOT EXISTS idx_strategies_active ON strategies(is_active);
+CREATE INDEX IF NOT EXISTS idx_strategy_trades_strategy ON strategy_trades(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_strategy_trades_ticker ON strategy_trades(ticker);
 `;
 
 const SQL = {
@@ -252,6 +277,19 @@ const SQL = {
     getFundCapitalTransactions: 'SELECT fc.*, u.username FROM fund_capital fc JOIN users u ON fc.user_id = u.id WHERE fc.fund_id = $1 ORDER BY fc.created_at DESC',
     getUserCapitalInFund: 'SELECT * FROM fund_capital WHERE fund_id = $1 AND user_id = $2 ORDER BY created_at DESC',
     getFundCapitalSummary: 'SELECT user_id, SUM(CASE WHEN type = $2 THEN amount ELSE -amount END) as total_capital FROM fund_capital WHERE fund_id = $1 GROUP BY user_id',
+
+    // Strategy CRUD
+    insertStrategy: 'INSERT INTO strategies (fund_id, name, type, config, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+    getStrategyById: 'SELECT * FROM strategies WHERE id = $1',
+    getStrategiesByFund: 'SELECT * FROM strategies WHERE fund_id = $1 ORDER BY created_at DESC',
+    getActiveStrategies: 'SELECT * FROM strategies WHERE is_active = true ORDER BY created_at DESC',
+    updateStrategy: 'UPDATE strategies SET name = $1, type = $2, config = $3, is_active = $4, updated_at = $5 WHERE id = $6',
+    deleteStrategy: 'DELETE FROM strategies WHERE id = $1',
+
+    // Strategy Trade CRUD
+    insertStrategyTrade: 'INSERT INTO strategy_trades (strategy_id, ticker, side, quantity, price, executed_at) VALUES ($1, $2, $3, $4, $5, $6)',
+    getStrategyTrades: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 ORDER BY executed_at DESC LIMIT $2',
+    getStrategyTradesByTicker: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 AND ticker = $2 ORDER BY executed_at DESC',
 };
 
 let dbInitialized = false;
@@ -350,6 +388,19 @@ const stmts = {
     getFundCapitalTransactions: makeStatement('getFundCapitalTransactions', SQL.getFundCapitalTransactions),
     getUserCapitalInFund: makeStatement('getUserCapitalInFund', SQL.getUserCapitalInFund),
     getFundCapitalSummary: makeStatement('getFundCapitalSummary', SQL.getFundCapitalSummary),
+
+    // Strategy CRUD
+    insertStrategy: makeStatement('insertStrategy', SQL.insertStrategy),
+    getStrategyById: makeStatement('getStrategyById', SQL.getStrategyById),
+    getStrategiesByFund: makeStatement('getStrategiesByFund', SQL.getStrategiesByFund),
+    getActiveStrategies: makeStatement('getActiveStrategies', SQL.getActiveStrategies),
+    updateStrategy: makeStatement('updateStrategy', SQL.updateStrategy),
+    deleteStrategy: makeStatement('deleteStrategy', SQL.deleteStrategy),
+
+    // Strategy Trade CRUD
+    insertStrategyTrade: makeStatement('insertStrategyTrade', SQL.insertStrategyTrade),
+    getStrategyTrades: makeStatement('getStrategyTrades', SQL.getStrategyTrades),
+    getStrategyTradesByTicker: makeStatement('getStrategyTradesByTicker', SQL.getStrategyTradesByTicker),
 };
 
 async function runInTransaction(operationName, transactionFn) {
