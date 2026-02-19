@@ -3,8 +3,8 @@ const dns = require('dns');
 const util = require('util');
 const url = require('url');
 
-// Promisify dns.lookup
-const lookup = util.promisify(dns.lookup);
+// Use resolve4 to bypass OS getaddrinfo quirks and force network DNS for IPv4
+const resolve4 = util.promisify(dns.resolve4);
 
 const isProduction = process.env.NODE_ENV === 'production';
 let connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/streetos';
@@ -14,56 +14,76 @@ let pool = null;
 let poolInitPromise = null;
 
 async function initializePool() {
+  console.log('[DB] Initializing connection pool...');
   try {
-    // Parse the connection string
-    // Handle cases where connectionString might not be a full URL (though standard libpq format is)
-    // If it's localhost, we don't need to resolve usually, but let's be consistent.
-
-    // Check if it's a URL
     let dbUrl;
     try {
       dbUrl = new url.URL(connectionString);
     } catch (e) {
-      // If not a URL, it might be a keyword string (host=... port=...) 
-      // In that case we can't easily parse and replace host without a real parser.
-      // But usually DATABASE_URL is a URI.
-      console.log('[DB] DATABASE_URL is not a standard URI, skipping IPv4 resolution hack.');
+      console.log('[DB] DATABASE_URL is not a standard URI, using as-is.');
       pool = new Pool({
         connectionString,
-        ssl: isProduction ? { rejectUnauthorized: false } : false
+        ssl: { rejectUnauthorized: false } // Default optimize for cloud
       });
       return;
     }
 
     const hostname = dbUrl.hostname;
 
-    // If hostname is NOT an IP, try to resolve it to IPv4
+    // Check if hostname is already an IP
     const isIp = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname) || /^\[.*\]$/.test(hostname);
 
     if (!isIp && hostname !== 'localhost') {
-      console.log(`[DB] Resolving ${hostname} to IPv4...`);
+      console.log(`[DB] Resolving ${hostname} to IPv4 via dns.resolve4...`);
       try {
-        const { address } = await lookup(hostname, { family: 4 });
-        console.log(`[DB] Resolved ${hostname} -> ${address}`);
+        // Determine addresses
+        const addresses = await resolve4(hostname);
+        if (addresses && addresses.length > 0) {
+          const ip = addresses[0];
+          console.log(`[DB] Resolved ${hostname} -> ${ip}`);
 
-        // Construct config explicitly instead of modifying connectionString string to avoid malforming auth
-        const config = {
-          user: dbUrl.username,
-          password: dbUrl.password,
-          host: address,
-          port: dbUrl.port || 5432,
-          database: dbUrl.pathname.split('/')[1],
-          ssl: { rejectUnauthorized: false } // Force SSL for resolved cloud DBs
-        };
+          // Construct config using the resolved IP
+          const config = {
+            user: dbUrl.username,
+            password: dbUrl.password,
+            host: ip, // Use the IP directly
+            port: dbUrl.port || 5432,
+            database: dbUrl.pathname.split('/')[1],
+            ssl: { rejectUnauthorized: false } // Important for Supabase/Cloud
+          };
 
-        pool = new Pool(config);
+          pool = new Pool(config);
+        } else {
+          throw new Error('No IPv4 addresses found');
+        }
       } catch (e) {
-        console.error('[DB] DNS Resolution failed, falling back to original string:', e.message);
-        const isLocal = connectionString.includes('localhost') || connectionString.includes('127.0.0.1');
-        pool = new Pool({
-          connectionString,
-          ssl: isLocal ? false : { rejectUnauthorized: false }
-        });
+        console.error('[DB] DNS Resolution failed:', e.message);
+        console.log('[DB] Attempting dns.lookup(all:true) for IPv4 addresses...');
+        try {
+          // Try a system lookup that may return IPv4 when resolve4 fails
+          const lookupResults = await dns.promises.lookup(hostname, { all: true });
+          const ipv4 = (lookupResults || []).find(r => r.family === 4);
+          if (ipv4 && ipv4.address) {
+            const ip = ipv4.address;
+            console.log(`[DB] Found IPv4 via lookup -> ${ip}`);
+            const config = {
+              user: dbUrl.username,
+              password: dbUrl.password,
+              host: ip,
+              port: dbUrl.port || 5432,
+              database: dbUrl.pathname.split('/')[1],
+              ssl: { rejectUnauthorized: false }
+            };
+            pool = new Pool(config);
+          } else {
+            console.log('[DB] No IPv4 addresses found via lookup, retrying with connectionString (may attempt IPv6)...');
+            pool = new Pool({ connectionString, ssl: { rejectUnauthorized: false } });
+          }
+        } catch (e2) {
+          console.log('[DB] lookup failed:', e2.message);
+          console.log('[DB] Retrying with standard connection string (WARNING: May attempt IPv6)...');
+          pool = new Pool({ connectionString, ssl: { rejectUnauthorized: false } });
+        }
       }
     } else {
       const isLocal = connectionString.includes('localhost') || connectionString.includes('127.0.0.1');
@@ -75,7 +95,6 @@ async function initializePool() {
 
   } catch (e) {
     console.error('[DB] Fatal Init Error:', e);
-    // Fallback
     pool = new Pool({ connectionString });
   }
 }
