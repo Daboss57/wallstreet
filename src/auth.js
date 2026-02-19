@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { v4: uuid } = require('uuid');
-const { getOne, query } = require('./db');
+const { stmts } = require('./db');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'streetos-secret-key-change-in-prod';
 const STARTING_CASH = 100000;
@@ -11,15 +11,12 @@ async function register(username, password) {
     if (username.length < 3) throw new Error('Username must be at least 3 characters');
     if (password.length < 4) throw new Error('Password must be at least 4 characters');
 
-    const existing = await getOne('SELECT * FROM users WHERE username = $1', [username.toLowerCase()]);
+    const existing = await stmts.getUserByUsername.get(username.toLowerCase());
     if (existing) throw new Error('Username already taken');
 
     const id = uuid();
     const hash = bcrypt.hashSync(password, 10);
-    await query(
-        'INSERT INTO users (id, username, password_hash, cash, starting_cash) VALUES ($1, $2, $3, $4, $5)',
-        [id, username.toLowerCase(), hash, STARTING_CASH, STARTING_CASH]
-    );
+    await stmts.insertUser.run(id, username.toLowerCase(), hash, STARTING_CASH, STARTING_CASH);
 
     const token = jwt.sign({ id, username: username.toLowerCase() }, JWT_SECRET, { expiresIn: '7d' });
     return { token, user: { id, username: username.toLowerCase(), cash: STARTING_CASH } };
@@ -28,7 +25,7 @@ async function register(username, password) {
 async function login(username, password) {
     if (!username || !password) throw new Error('Username and password required');
 
-    const user = await getOne('SELECT * FROM users WHERE username = $1', [username.toLowerCase()]);
+    const user = await stmts.getUserByUsername.get(username.toLowerCase());
     if (!user) throw new Error('Invalid credentials');
 
     if (!bcrypt.compareSync(password, user.password_hash)) throw new Error('Invalid credentials');

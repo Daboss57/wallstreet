@@ -1,5 +1,5 @@
 const { v4: uuid } = require('uuid');
-const { query } = require('./db');
+const { stmts, isDbUnavailableError } = require('./db');
 const engine = require('./engine');
 
 // ─── News Templates ────────────────────────────────────────────────────────────
@@ -152,13 +152,23 @@ function q() { return Math.floor(Math.random() * 4) + 1; }
 // ─── News Engine ───────────────────────────────────────────────────────────────
 let newsInterval = null;
 let nextNewsTime = 0;
+let paused = false;
+let inFlight = false;
+let lastDbErrorLogAt = 0;
 
 function scheduleNext() {
     // Random 15–90 seconds (compressed time — in production these would be 15–90 minutes)
     nextNewsTime = Date.now() + (Math.random() * 75000 + 15000);
 }
 
-function generateEvent() {
+function logDbError(error) {
+    const now = Date.now();
+    if (now - lastDbErrorLogAt < 15000) return;
+    lastDbErrorLogAt = now;
+    console.error('[News] DB write failed:', error.message);
+}
+
+async function generateEvent() {
     const templateKey = TEMPLATE_KEYS[Math.floor(Math.random() * TEMPLATE_KEYS.length)];
     const template = TEMPLATES[templateKey];
     const now = Date.now();
@@ -222,11 +232,10 @@ function generateEvent() {
     };
 
     try {
-        query('INSERT INTO news_events (id, ticker, type, headline, body, price_impact, severity, fired_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-            [eventId, event.ticker, event.type, headline, body, event.priceImpact, event.severity, now]
-        ).catch(e => console.error('News save error:', e.message));
+        await stmts.insertNews.run(eventId, event.ticker, event.type, headline, body, event.priceImpact, event.severity, now);
     } catch (e) {
-        console.error('News save error:', e.message);
+        if (isDbUnavailableError(e)) logDbError(e);
+        else console.error('[News] Save error:', e.message);
     }
 
     // Broadcast
@@ -245,16 +254,41 @@ function randomTicker() {
 function start() {
     scheduleNext();
     newsInterval = setInterval(() => {
-        if (Date.now() >= nextNewsTime) {
-            generateEvent();
-            scheduleNext();
-        }
+        if (paused || inFlight) return;
+        if (Date.now() < nextNewsTime) return;
+        inFlight = true;
+        generateEvent()
+            .catch((error) => {
+                if (isDbUnavailableError(error)) logDbError(error);
+                else console.error('[News] Event generation failed:', error.message);
+            })
+            .finally(() => {
+                scheduleNext();
+                inFlight = false;
+            });
     }, 1000);
     console.log('[News] Engine started');
+}
+
+function pause(reason = 'db_unavailable') {
+    if (paused) return;
+    paused = true;
+    console.warn(`[News] Paused generation (${reason})`);
+}
+
+function resume() {
+    if (!paused) return;
+    paused = false;
+    scheduleNext();
+    console.log('[News] Resumed generation');
+}
+
+function isPaused() {
+    return paused;
 }
 
 function stop() {
     if (newsInterval) clearInterval(newsInterval);
 }
 
-module.exports = { start, stop, generateEvent };
+module.exports = { start, stop, pause, resume, isPaused, generateEvent };

@@ -1,272 +1,328 @@
 const express = require('express');
 const { v4: uuid } = require('uuid');
-const { query, getOne, getAll } = require('./db');
+const { stmts, isDbUnavailableError } = require('./db');
 const { register, login, authenticate } = require('./auth');
 const engine = require('./engine');
 const orderbook = require('./orderbook');
 
 const router = express.Router();
 
-// ─── Auth Routes ───────────────────────────────────────────────────────────────
-router.post('/auth/register', async (req, res) => {
-    try {
-        const result = await register(req.body.username, req.body.password);
-        res.json(result);
-    } catch (e) {
-        res.status(400).json({ error: e.message });
+function handleRouteError(res, error, defaultStatus = 500) {
+    if (isDbUnavailableError(error)) {
+        return res.status(503).json({ error: 'db_unavailable' });
     }
-});
+    return res.status(defaultStatus).json({ error: error.message || 'Internal server error' });
+}
+
+function asyncRoute(handler, defaultStatus = 500) {
+    return async (req, res) => {
+        try {
+            await handler(req, res);
+        } catch (error) {
+            handleRouteError(res, error, defaultStatus);
+        }
+    };
+}
+
+// Auth Routes
+router.post('/auth/register', asyncRoute(async (req, res) => {
+    const result = await register(req.body.username, req.body.password);
+    res.json(result);
+}, 400));
 
 router.post('/auth/login', async (req, res) => {
     try {
         const result = await login(req.body.username, req.body.password);
         res.json(result);
-    } catch (e) {
-        res.status(400).json({ error: e.message });
+    } catch (error) {
+        if (isDbUnavailableError(error)) {
+            return res.status(503).json({ error: 'db_unavailable' });
+        }
+        return res.status(401).json({ error: error.message });
     }
 });
 
-router.get('/me', authenticate, async (req, res) => {
-    try {
-        const user = await getOne('SELECT id, username, cash, starting_cash, role, created_at FROM users WHERE id = $1', [req.user.id]);
-        res.json(user);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
+router.get('/me', authenticate, asyncRoute(async (req, res) => {
+    const user = await stmts.getUserById.get(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    return res.json(user);
+}));
 
-router.post('/auth/reset', authenticate, async (req, res) => {
-    try {
-        await query('BEGIN');
-        // Delete everything
-        await query('DELETE FROM trades WHERE user_id = $1', [req.user.id]);
-        await query('DELETE FROM orders WHERE user_id = $1', [req.user.id]);
-        await query('DELETE FROM positions WHERE user_id = $1', [req.user.id]);
-        await query('DELETE FROM firm_members WHERE user_id = $1', [req.user.id]);
-        await query('DELETE FROM firm_invitations WHERE inviter_id = $1', [req.user.id]);
-        // Reset cash
-        await query('UPDATE users SET cash = 100000 WHERE id = $1', [req.user.id]);
-        await query('COMMIT');
-
-        // Reset engine in-memory state if necessary (assuming engine re-fetches from DB or we need to clear cache)
-        // Since engine manages global price state, user reset doesn't affect it. 
-        // But we might need to clear user specific stuff if any? No, engine is mostly ticker state.
-
-        res.json({ success: true });
-    } catch (e) {
-        await query('ROLLBACK');
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// ─── Market Data ───────────────────────────────────────────────────────────────
+// Ticker / Market Data
 router.get('/tickers', (req, res) => {
-    const prices = engine.getAllPrices();
     const defs = engine.getAllTickerDefs();
+    const prices = engine.getAllPrices();
     const result = {};
-    for (const ticker of engine.TICKER_LIST) {
-        result[ticker] = { ...defs[ticker], ...(prices[ticker] || {}) };
+    for (const [ticker, def] of Object.entries(defs)) {
+        const p = prices[ticker];
+        result[ticker] = {
+            ...def,
+            ticker,
+            price: p?.price,
+            bid: p?.bid,
+            ask: p?.ask,
+            open: p?.open,
+            high: p?.high,
+            low: p?.low,
+            prevClose: p?.prevClose,
+            volume: p?.volume,
+            change: p ? +(p.price - p.prevClose).toFixed(engine.getDecimals(ticker)) : 0,
+            changePct: p && p.prevClose ? +(((p.price - p.prevClose) / p.prevClose) * 100).toFixed(2) : 0,
+        };
     }
     res.json(result);
 });
 
-router.get('/tickers/:ticker', (req, res) => {
-    const p = engine.getPrice(req.params.ticker);
-    const d = engine.getTickerDef(req.params.ticker);
-    if (!p) return res.status(404).json({ error: 'Ticker not found' });
-    res.json({ ...d, ...p });
-});
-
-router.get('/candles/:ticker', async (req, res) => {
+router.get('/candles/:ticker', asyncRoute(async (req, res) => {
     const { ticker } = req.params;
-    const { interval = '1m', limit = 100 } = req.query;
+    const interval = req.query.interval || '1m';
+    const limit = Math.min(Number.parseInt(req.query.limit, 10) || 500, 2000);
 
-    // Get historical from DB
-    const candles = await getAll(
-        'SELECT * FROM candles WHERE ticker = $1 AND interval = $2 ORDER BY open_time DESC LIMIT $3',
-        [ticker, interval, limit]
+    const candles = await stmts.getCandles.all(ticker.toUpperCase(), interval, limit);
+    candles.reverse();
+
+    const current = engine.getCurrentCandle(ticker.toUpperCase(), interval);
+    if (current) {
+        candles.push({
+            ticker: ticker.toUpperCase(),
+            interval,
+            open_time: current.openTime,
+            open: current.open,
+            high: current.high,
+            low: current.low,
+            close: current.close,
+            volume: current.volume,
+        });
+    }
+
+    res.json(candles);
+}));
+
+router.get('/orderbook/:ticker', asyncRoute(async (req, res) => {
+    const { ticker } = req.params;
+    const userOrders = await stmts.getOpenOrdersByTicker.all(ticker.toUpperCase());
+    const book = orderbook.generateBook(ticker.toUpperCase(), userOrders);
+    res.json(book);
+}));
+
+// Orders
+router.post('/orders', authenticate, asyncRoute(async (req, res) => {
+    const { ticker, type, side, qty, limitPrice, stopPrice, trailPct, ocoId } = req.body;
+
+    if (!ticker || !type || !side || !qty) {
+        return res.status(400).json({ error: 'Missing required fields: ticker, type, side, qty' });
+    }
+    if (!engine.getTickerDef(ticker.toUpperCase())) {
+        return res.status(400).json({ error: 'Invalid ticker' });
+    }
+    if (!['buy', 'sell'].includes(side)) {
+        return res.status(400).json({ error: 'Side must be buy or sell' });
+    }
+    if (qty <= 0) {
+        return res.status(400).json({ error: 'Quantity must be positive' });
+    }
+
+    const validTypes = ['market', 'limit', 'stop', 'stop-loss', 'stop-limit', 'take-profit', 'trailing-stop'];
+    if (!validTypes.includes(type)) {
+        return res.status(400).json({ error: `Invalid order type. Must be: ${validTypes.join(', ')}` });
+    }
+
+    const user = await stmts.getUserById.get(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const priceData = engine.getPrice(ticker.toUpperCase());
+    if (side === 'buy' && type === 'market' && priceData) {
+        const estimatedCost = qty * priceData.ask;
+        if (estimatedCost > user.cash) {
+            return res.status(400).json({ error: `Insufficient funds. Need $${estimatedCost.toFixed(2)}, have $${user.cash.toFixed(2)}` });
+        }
+    }
+
+    const orderId = uuid();
+    const now = Date.now();
+    await stmts.insertOrder.run(
+        orderId,
+        req.user.id,
+        ticker.toUpperCase(),
+        type,
+        side,
+        qty,
+        limitPrice || null,
+        stopPrice || null,
+        trailPct || null,
+        priceData?.price || null,
+        ocoId || null,
+        'open',
+        now
     );
 
-    // Prepend current in-memory candle if compatible
-    const current = engine.getCurrentCandle(ticker, interval);
-    if (current) {
-        // Only if newer than last DB candle
-        const lastDb = candles[0];
-        if (!lastDb || current.openTime > parseInt(lastDb.open_time)) {
-            candles.unshift({
-                open_time: current.openTime,
-                open: current.open,
-                high: current.high,
-                low: current.low,
-                close: current.close,
-                volume: current.volume
-            });
-        } else if (lastDb && current.openTime === parseInt(lastDb.open_time)) {
-            // Update the latest candle with live data
-            candles[0] = {
-                open_time: current.openTime,
-                open: current.open,
-                high: current.high,
-                low: current.low,
-                close: current.close,
-                volume: current.volume
-            };
+    const order = await stmts.getOrderById.get(orderId);
+    res.json({ success: true, order });
+}));
+
+router.delete('/orders/:id', authenticate, asyncRoute(async (req, res) => {
+    const order = await stmts.getOrderById.get(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (order.user_id !== req.user.id) return res.status(403).json({ error: 'Not your order' });
+    if (order.status !== 'open') return res.status(400).json({ error: 'Order is not open' });
+
+    await stmts.cancelOrder.run(Date.now(), req.params.id);
+    res.json({ success: true });
+}));
+
+router.get('/orders', authenticate, asyncRoute(async (req, res) => {
+    const orders = await stmts.getOpenOrders.all(req.user.id);
+    res.json(orders);
+}));
+
+// Positions
+router.get('/positions', authenticate, asyncRoute(async (req, res) => {
+    const positions = await stmts.getUserPositions.all(req.user.id);
+    const enriched = positions.map((position) => {
+        const priceData = engine.getPrice(position.ticker);
+        const currentPrice = priceData?.price || position.avg_cost;
+        const marketValue = position.qty * currentPrice;
+        const costBasis = position.qty * position.avg_cost;
+        const unrealizedPnl = marketValue - costBasis;
+        const pnlPct = costBasis !== 0 ? (unrealizedPnl / Math.abs(costBasis)) * 100 : 0;
+        return {
+            ...position,
+            currentPrice,
+            marketValue: +marketValue.toFixed(2),
+            costBasis: +costBasis.toFixed(2),
+            unrealizedPnl: +unrealizedPnl.toFixed(2),
+            pnlPct: +pnlPct.toFixed(2),
+        };
+    });
+    res.json(enriched);
+}));
+
+// Trades
+router.get('/trades', authenticate, asyncRoute(async (req, res) => {
+    const limit = Math.min(Number.parseInt(req.query.limit, 10) || 100, 500);
+    const trades = await stmts.getUserTrades.all(req.user.id, limit);
+    res.json(trades);
+}));
+
+// Leaderboard
+router.get('/leaderboard', asyncRoute(async (req, res) => {
+    const users = await stmts.getAllUsers.all();
+    const leaderboard = [];
+
+    for (const user of users) {
+        const positions = await stmts.getUserPositions.all(user.id);
+        let positionsValue = 0;
+        for (const position of positions) {
+            const priceData = engine.getPrice(position.ticker);
+            if (priceData) positionsValue += position.qty * priceData.price;
         }
-    }
 
-    res.json(candles.reverse()); // Frontend expects chronological
-});
+        const totalValue = user.cash + positionsValue;
+        const allTimeReturn = ((totalValue - user.starting_cash) / user.starting_cash) * 100;
 
-router.get('/orderbook/:ticker', (req, res) => {
-    res.json(orderbook.getBook(req.params.ticker));
-});
+        const badges = [];
+        if (totalValue > 50000) badges.push('🐋');
+        if (allTimeReturn > 100) badges.push('🦅');
+        if (totalValue < user.starting_cash * 0.3) badges.push('💀');
+        if (allTimeReturn > 400) badges.push('🚀');
 
-// ─── Trading Routes ────────────────────────────────────────────────────────────
+        const trades = await stmts.getUserTrades.all(user.id, 200);
+        if (trades.length >= 100) badges.push('🔥');
 
-// Get Positions
-router.get('/positions', authenticate, async (req, res) => {
-    try {
-        const positions = await getAll('SELECT * FROM positions WHERE user_id = $1', [req.user.id]);
-        // Enrich with current price
-        const result = positions.map(p => {
-            const price = engine.getPrice(p.ticker)?.price || 0;
-            const marketValue = p.qty * price;
-            const unrealizedPnl = marketValue - (p.qty * p.avg_cost);
-            const pnlPct = p.avg_cost ? (unrealizedPnl / (p.qty * p.avg_cost)) * 100 : 0;
-            return { ...p, currentPrice: price, marketValue, unrealizedPnl, pnlPct };
+        let streak = 0;
+        let maxStreak = 0;
+        for (const trade of trades) {
+            if (trade.pnl > 0) {
+                streak += 1;
+                maxStreak = Math.max(maxStreak, streak);
+            } else {
+                streak = 0;
+            }
+        }
+        if (maxStreak >= 10) badges.push('🎯');
+
+        leaderboard.push({
+            username: user.username,
+            portfolioValue: +totalValue.toFixed(2),
+            cash: +user.cash.toFixed(2),
+            positionsValue: +positionsValue.toFixed(2),
+            allTimeReturn: +allTimeReturn.toFixed(2),
+            badges,
+            joinedAt: user.created_at,
         });
-        res.json(result);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
     }
-});
 
-// Get Orders
-router.get('/orders', authenticate, async (req, res) => {
-    try {
-        const orders = await getAll(
-            "SELECT * FROM orders WHERE user_id = $1 AND status = 'open' ORDER BY created_at DESC",
-            [req.user.id]
-        );
-        res.json(orders);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
+    leaderboard.sort((a, b) => b.portfolioValue - a.portfolioValue);
+    leaderboard.forEach((entry, index) => {
+        entry.rank = index + 1;
+    });
+
+    res.json(leaderboard);
+}));
+
+// News
+router.get('/news', asyncRoute(async (req, res) => {
+    const ticker = req.query.ticker;
+    const limit = Math.min(Number.parseInt(req.query.limit, 10) || 50, 200);
+
+    let events;
+    if (ticker) {
+        events = await stmts.getNewsByTicker.all(ticker.toUpperCase(), limit);
+    } else {
+        events = await stmts.getRecentNews.all(limit);
     }
-});
+    res.json(events);
+}));
 
-// Place Order
-router.post('/orders', authenticate, async (req, res) => {
-    const { ticker, type, side, qty, limitPrice, stopPrice, trailPct } = req.body;
+// Portfolio Stats
+router.get('/portfolio/stats', authenticate, asyncRoute(async (req, res) => {
+    const user = await stmts.getUserById.get(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
-    if (!ticker || !type || !side || !qty) return res.status(400).json({ error: 'Missing fields' });
-    if (!engine.getTickerDef(ticker)) return res.status(400).json({ error: 'Invalid ticker' });
-    if (qty <= 0) return res.status(400).json({ error: 'Invalid quantity' });
+    const positions = await stmts.getUserPositions.all(req.user.id);
+    const trades = await stmts.getUserTrades.all(req.user.id, 500);
 
-    // Lock user cash/positions via transaction
-    try {
-        await query('BEGIN');
-
-        const user = await getOne('SELECT * FROM users WHERE id = $1', [req.user.id]);
-        const currentPrice = engine.getPrice(ticker).price;
-
-        // Basic validation
-        if (side === 'buy' && type === 'market') {
-            const cost = qty * currentPrice;
-            if (user.cash < cost) throw new Error('Insufficient buying power');
-        }
-
-        // Short selling logic checks would go here...
-
-        const orderId = uuid();
-        const now = Date.now();
-
-        await query(
-            `INSERT INTO orders (id, user_id, ticker, type, side, qty, limit_price, stop_price, trail_pct, trail_high, status, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', $11)`,
-            [orderId, req.user.id, ticker, type, side, qty, limitPrice, stopPrice, trailPct, type === 'trailing-stop' ? currentPrice : null, now]
-        );
-
-        // If Market Order, execute immediately (simplified synchronous execution inside the request)
-        if (type === 'market') {
-            const fillPrice = currentPrice; // In real engine, would walk order book
-            // Execute trade logic (deduct cash, add position)
-            // ... For brevity, assume the Engine/Matching engine handles this asynchronously typically.
-            // But here we are doing it "inline" for simplicity or needing to refactor the logic from `matcher.js`?
-            // The original code likely had `engine` or `matcher` handle checks.
-            // Let's defer to a separate function or keeping it simple:
-
-            // For now, let's just save order and let the "Matcher" loop pick it up?
-            // Wait, the previous architecture had `matcher.js`. I need to verify if I need to call it.
-            // The user's prompt implies preserving functionality. 
-            // In the previous `server.js`, `matcher` wasn't explicitly started but `api` required `engine`.
-            // Let's assume there is a matching loop or we do it here.
-            // Actually, let's invoke the `matcher.processOrder` if we have it. 
-            // Since `matcher.js` was in the file list, I should probably check it.
-        }
-
-        await query('COMMIT');
-
-        // Notify matcher (if event driven) or just return success
-        // In this implementation, we will follow the "polling" or "tick" approach of the matcher?
-        // Or if the matcher is event-based.
-        // Let's assume we return success and the background matcher picks it up.
-
-        res.json({ success: true, orderId });
-    } catch (e) {
-        await query('ROLLBACK');
-        res.status(400).json({ error: e.message });
+    let positionsValue = 0;
+    for (const position of positions) {
+        const priceData = engine.getPrice(position.ticker);
+        if (priceData) positionsValue += position.qty * priceData.price;
     }
-});
 
-// Modify Order (Drag-and-Drop)
-router.put('/orders/:id', authenticate, async (req, res) => {
-    const { id } = req.params;
-    const { price, stopPrice } = req.body;
+    const totalValue = user.cash + positionsValue;
+    const allTimeReturn = ((totalValue - user.starting_cash) / user.starting_cash) * 100;
 
-    try {
-        const order = await getOne('SELECT * FROM orders WHERE id = $1', [id]);
-        if (!order) return res.status(404).json({ error: 'Order not found' });
-        if (order.user_id !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-        if (order.status !== 'open') return res.status(400).json({ error: 'Order not open' });
+    const wins = trades.filter((trade) => trade.pnl > 0);
+    const losses = trades.filter((trade) => trade.pnl < 0);
+    const winRate = trades.length > 0 ? (wins.length / trades.length) * 100 : 0;
+    const avgWin = wins.length > 0 ? wins.reduce((sum, trade) => sum + trade.pnl, 0) / wins.length : 0;
+    const avgLoss = losses.length > 0 ? losses.reduce((sum, trade) => sum + trade.pnl, 0) / losses.length : 0;
 
-        // Update fields
-        if (price !== undefined) {
-            // If manual update of limit price
-            await query('UPDATE orders SET limit_price = $1 WHERE id = $2', [price, id]);
-        }
-        if (stopPrice !== undefined) {
-            await query('UPDATE orders SET stop_price = $1 WHERE id = $2', [stopPrice, id]);
-        }
+    const bestTrade = trades.reduce((best, trade) => (trade.pnl > (best?.pnl || -Infinity) ? trade : best), null);
+    const worstTrade = trades.reduce((worst, trade) => (trade.pnl < (worst?.pnl || Infinity) ? trade : worst), null);
 
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
+    const tickerCounts = {};
+    for (const trade of trades) {
+        tickerCounts[trade.ticker] = (tickerCounts[trade.ticker] || 0) + 1;
     }
-});
+    const mostTraded = Object.entries(tickerCounts).sort((a, b) => b[1] - a[1])[0];
 
-// Cancel Order
-router.delete('/orders/:id', authenticate, async (req, res) => {
-    try {
-        const order = await getOne('SELECT * FROM orders WHERE id = $1', [req.params.id]);
-        if (!order) return res.status(404).json({ error: 'Order not found' });
-        if (order.user_id !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
+    const snapshots = await stmts.getUserSnapshots.all(req.user.id, 500);
 
-        await query("UPDATE orders SET status = 'cancelled', cancelled_at = $1 WHERE id = $2", [Date.now(), req.params.id]);
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// Trade History
-router.get('/trades', authenticate, async (req, res) => {
-    const limit = parseInt(req.query.limit) || 50;
-    try {
-        const trades = await getAll('SELECT * FROM trades WHERE user_id = $1 ORDER BY executed_at DESC LIMIT $2', [req.user.id, limit]);
-        res.json(trades);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
+    res.json({
+        totalValue: +totalValue.toFixed(2),
+        cash: +user.cash.toFixed(2),
+        positionsValue: +positionsValue.toFixed(2),
+        startingCash: user.starting_cash,
+        allTimeReturn: +allTimeReturn.toFixed(2),
+        totalTrades: trades.length,
+        winRate: +winRate.toFixed(1),
+        avgWin: +avgWin.toFixed(2),
+        avgLoss: +avgLoss.toFixed(2),
+        bestTrade,
+        worstTrade,
+        mostTraded: mostTraded ? { ticker: mostTraded[0], count: mostTraded[1] } : null,
+        snapshots: snapshots.reverse(),
+    });
+}));
 
 module.exports = router;

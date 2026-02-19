@@ -10,15 +10,9 @@ const ChartManager = {
     currentTicker: null,
     currentInterval: '1m',
     lastCandleTime: null,
-    _priceLines: [],       // active price line objects
-    _priceLineData: new Map(), // map line -> { type: 'entry'|'tp'|'sl'|'limit'|'stop', id: orderId, price: number }
+    _priceLines: [],       // active price line references
     _positionLines: null,  // { entry, tp, sl }
     _orderLines: [],       // pending order lines
-
-    // Drag state
-    _isDragging: false,
-    _draggedLine: null,
-    _hoveredLine: null,
 
     init(container) {
         if (this.chart) this.chart.remove();
@@ -53,17 +47,8 @@ const ChartManager = {
                 barSpacing: 8,
             },
             handleScale: { axisPressedMouseMove: true },
-            handleScale: { axisPressedMouseMove: true },
             handleScroll: { mouseWheel: true, pressedMouseMove: true },
         });
-
-        // Mouse events for drag-and-drop
-        container.addEventListener('mousedown', (e) => this.onMouseDown(e));
-        container.addEventListener('mousemove', (e) => this.onMouseMove(e));
-        container.addEventListener('mouseup', (e) => this.onMouseUp(e));
-        container.addEventListener('mouseleave', () => this.onMouseUp()); // Cancel drag on leave
-
-        this.chart.subscribeCrosshairMove(param => this.onCrosshairMove(param));
 
         this.candleSeries = this.chart.addCandlestickSeries({
             upColor: '#22c55e',
@@ -170,16 +155,10 @@ const ChartManager = {
                 this.candleSeries.update({
                     time,
                     open: tick.open || tick.price,
-                    high: Math.max(tick.high || tick.price || tick.open, tick.price),
-                    low: Math.min(tick.low || tick.price || tick.open, tick.price),
+                    high: Math.max(tick.high || tick.price, tick.price),
+                    low: Math.min(tick.low || tick.price, tick.price),
                     close: tick.price,
                 });
-            }
-
-            // Update entry P&L live
-            if (this._positionLines?.entry) {
-                const data = this._priceLineData.get(this._positionLines.entry);
-                if (data) this.updateEntryPnl(data.position, tick.price);
             }
         }
     },
@@ -191,11 +170,8 @@ const ChartManager = {
             try { this.candleSeries.removePriceLine(line); } catch (_) { }
         }
         this._priceLines = [];
-        this._priceLineData.clear();
         this._positionLines = null;
         this._orderLines = [];
-        this._draggedLine = null;
-        this._hoveredLine = null;
     },
 
     /**
@@ -216,7 +192,7 @@ const ChartManager = {
         const isLong = position.qty > 0;
         const entry = position.avg_cost;
 
-        // ─── Entry line (blue) ──
+        // ── Entry line (blue) ──
         const entryPnl = ((currentPrice - entry) * qty * (isLong ? 1 : -1));
         const entryPnlStr = entryPnl >= 0 ? `+${Utils.money(entryPnl)}` : Utils.money(entryPnl);
         const entryLine = this.candleSeries.createPriceLine({
@@ -229,7 +205,6 @@ const ChartManager = {
         });
 
         this._priceLines.push(entryLine);
-        this._priceLineData.set(entryLine, { type: 'entry', position });
         const posLines = { entry: entryLine, tp: null, sl: null };
 
         // ── Take-Profit line (green) ──
@@ -239,14 +214,12 @@ const ChartManager = {
             const tpLine = this.candleSeries.createPriceLine({
                 price: tpPrice,
                 color: '#22c55e',
-                lineWidth: 2,
+                lineWidth: 1,
                 lineStyle: 2, // Dashed
                 axisLabelVisible: true,
                 title: `TP   ${tpPnlStr}`,
-                draggable: true // custom flag
             });
             this._priceLines.push(tpLine);
-            this._priceLineData.set(tpLine, { type: 'tp', id: 'tp-dummy', position }); // In real app, bind to OCO order ID
             posLines.tp = tpLine;
         }
 
@@ -257,14 +230,12 @@ const ChartManager = {
             const slLine = this.candleSeries.createPriceLine({
                 price: slPrice,
                 color: '#ef4444',
-                lineWidth: 2,
+                lineWidth: 1,
                 lineStyle: 2, // Dashed
                 axisLabelVisible: true,
                 title: `SL   ${slPnlStr}`,
-                draggable: true
             });
             this._priceLines.push(slLine);
-            this._priceLineData.set(slLine, { type: 'sl', id: 'sl-dummy', position });
             posLines.sl = slLine;
         }
 
@@ -312,15 +283,13 @@ const ChartManager = {
                 const line = this.candleSeries.createPriceLine({
                     price,
                     color,
-                    lineWidth: 2,
+                    lineWidth: 1,
                     lineStyle: 1, // Dotted
                     axisLabelVisible: true,
                     title: `${order.type.toUpperCase()} ${label}`,
-                    draggable: true,
                 });
                 this._priceLines.push(line);
                 this._orderLines.push(line);
-                this._priceLineData.set(line, { type: 'order', id: order.id, order });
             }
         }
     },
@@ -369,127 +338,6 @@ const ChartManager = {
         if (this._resizeObserver) this._resizeObserver.disconnect();
         if (this.chart) { this.chart.remove(); this.chart = null; }
         Utils.off('ticks', this.onTicks);
-    },
-
-    // ─── Interaction Logic ────────────────────────────────────────────────────────
-
-    onCrosshairMove(param) {
-        if (this._isDragging) return; // Don't hover detect while dragging
-        if (!param || !param.seriesData || !param.point) {
-            this.setCursor('default');
-            this._hoveredLine = null;
-            return;
-        }
-
-        const price = this.candleSeries.coordinateToPrice(param.point.y);
-        const hovered = this.findNearestLine(price);
-
-        if (hovered) {
-            this.setCursor('ns-resize');
-            this._hoveredLine = hovered;
-        } else {
-            this.setCursor('default');
-            this._hoveredLine = null;
-        }
-    },
-
-    findNearestLine(price) {
-        if (!price) return null;
-        let nearest = null;
-        let minDist = Infinity;
-
-        // Convert prices to pixels to check distance visually
-        const pricePx = this.candleSeries.priceToCoordinate(price);
-
-        for (const line of this._priceLines) {
-            const data = this._priceLineData.get(line);
-            if (!data || data.type === 'entry') continue; // Entry line static for now
-
-            const linePrice = line.options().price;
-            const linePx = this.candleSeries.priceToCoordinate(linePrice);
-
-            if (linePx === null) continue; // Out of view?
-
-            const dist = Math.abs(pricePx - linePx);
-            if (dist < 10) { // 10px threshold
-                if (dist < minDist) {
-                    minDist = dist;
-                    nearest = line;
-                }
-            }
-        }
-        return nearest;
-    },
-
-    setCursor(cursor) {
-        const container = document.getElementById('chart-container');
-        if (container) container.style.cursor = cursor;
-    },
-
-    onMouseDown(e) {
-        if (this._hoveredLine) {
-            this._isDragging = true;
-            this._draggedLine = this._hoveredLine;
-            this.chart.applyOptions({ handleScroll: { pressedMouseMove: false } }); // Disable scroll drag
-        }
-    },
-
-    onMouseMove(e) {
-        if (!this._isDragging || !this._draggedLine) return;
-
-        // Calculate new price from mouse Y
-        // Need to get chart rect
-        const container = document.getElementById('chart-container');
-        const rect = container.getBoundingClientRect();
-        const y = e.clientY - rect.top;
-
-        const newPrice = this.candleSeries.coordinateToPrice(y);
-        if (newPrice && newPrice > 0) {
-            // Snap to tick size? (e.g. 0.01)
-            const tickSize = 0.01;
-            const sub = newPrice % tickSize;
-            const snapped = newPrice - sub;
-
-            // Visual update
-            this._draggedLine.applyOptions({ price: snapped });
-        }
-    },
-
-    async onMouseUp(e) {
-        if (this._isDragging && this._draggedLine) {
-            const line = this._draggedLine;
-            const price = line.options().price;
-            const data = this._priceLineData.get(line);
-
-            this._isDragging = false;
-            this._draggedLine = null;
-            this.chart.applyOptions({ handleScroll: { pressedMouseMove: true } }); // Re-enable scroll
-
-            // API Call
-            if (data.type === 'order') {
-                try {
-                    // Update limit/stop price
-                    console.log('Update order', data.id, price);
-                    // For now, assume limit price for limit orders, stop for stop orders
-                    const isStop = ['stop', 'stop-loss', 'take-profit', 'trailing-stop'].includes(data.order.type);
-                    const payload = isStop ? { stopPrice: price } : { price };
-
-                    await Utils.put(`/orders/${data.id}`, payload);
-                    Utils.showToast('success', 'Order Updated', `New price: ${Utils.num(price)}`);
-                    if (window.Terminal) Terminal.loadPortfolioData();
-                } catch (err) {
-                    Utils.showToast('error', 'Update Failed', err.message);
-                    // Revert visual? Terminal reload will fix it
-                    if (window.Terminal) Terminal.loadPortfolioData();
-                }
-            } else if (data.type === 'tp' || data.type === 'sl') {
-                // Handle TP/SL modification for position
-                // Logic: Find the associated order? Or create new one?
-                // Currently backend doesn't link OCO properly exposed to frontend in this simplified version
-                // So we'll warn user for now
-                Utils.showToast('info', 'Feature Pending', 'Direct TP/SL modification coming soon. Use Order Panel.');
-            }
-        }
     }
 };
 

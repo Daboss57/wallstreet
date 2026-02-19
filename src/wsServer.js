@@ -3,7 +3,7 @@ const { verifyToken } = require('./auth');
 const engine = require('./engine');
 const orderbook = require('./orderbook');
 const matcher = require('./matcher');
-const { getAll, getOne } = require('./db');
+const { stmts, isDbUnavailableError } = require('./db');
 
 // ─── WebSocket Server ──────────────────────────────────────────────────────────
 // Ultra low latency: direct message buffering, per-ticker subscription, binary-ready
@@ -25,13 +25,18 @@ function init(server) {
         ws.isAlive = true;
         ws.on('pong', () => { ws.isAlive = true; });
 
-        ws.on('message', async (data) => {
+        ws.on('message', (data) => {
             try {
                 const msg = JSON.parse(data);
-                await handleMessage(ws, clientState, msg);
+                Promise.resolve(handleMessage(ws, clientState, msg)).catch((error) => {
+                    if (isDbUnavailableError(error)) {
+                        sendJSON(ws, { type: 'error', message: 'db_unavailable' });
+                        return;
+                    }
+                    sendJSON(ws, { type: 'error', message: error.message || 'Request failed' });
+                });
             } catch (e) {
-                console.error('WS Message Error:', e);
-                sendJSON(ws, { type: 'error', message: 'Invalid request' });
+                sendJSON(ws, { type: 'error', message: 'Invalid JSON' });
             }
         });
 
@@ -82,14 +87,19 @@ function init(server) {
         }
 
         // Run order matching every tick
-        // matchAll is async, we call it without await to not block tick loop, but catch errors
-        matcher.matchAll().catch(e => console.error('Matcher Error:', e));
+        matcher.matchAll().catch((error) => {
+            if (isDbUnavailableError(error)) return;
+            console.error('[WebSocket] Matcher failed:', error.message);
+        });
 
         // Send order book updates every 2nd tick for subscribed tickers
         if (engine.TICKER_LIST._tickBookCounter === undefined) engine.TICKER_LIST._tickBookCounter = 0;
         engine.TICKER_LIST._tickBookCounter++;
         if (engine.TICKER_LIST._tickBookCounter % 2 === 0) {
-            broadcastOrderBooks().catch(e => console.error('Orderbook Broadcast Error:', e));
+            broadcastOrderBooks().catch((error) => {
+                if (isDbUnavailableError(error)) return;
+                console.error('[WebSocket] Orderbook broadcast failed:', error.message);
+            });
         }
     });
 
@@ -99,13 +109,19 @@ function init(server) {
     });
 
     // ── Hook into matcher for fill broadcasts ──
-    matcher.setFillCallback(async (userId, fill) => {
+    matcher.setFillCallback((userId, fill) => {
         for (const [ws, state] of clients) {
             if (ws.readyState !== WebSocket.OPEN) continue;
             if (state.userId === userId) {
                 sendJSON(ws, fill);
                 // Also send updated positions and cash
-                await sendPortfolioUpdate(ws, userId);
+                sendPortfolioUpdate(ws, userId).catch((error) => {
+                    if (isDbUnavailableError(error)) {
+                        sendJSON(ws, { type: 'error', message: 'db_unavailable' });
+                        return;
+                    }
+                    console.error('[WebSocket] Portfolio refresh failed:', error.message);
+                });
             }
         }
     });
@@ -162,34 +178,30 @@ async function handleMessage(ws, state, msg) {
 }
 
 async function sendPortfolioUpdate(ws, userId) {
-    try {
-        const user = await getOne('SELECT * FROM users WHERE id = $1', [userId]);
-        if (!user) return;
+    const user = await stmts.getUserById.get(userId);
+    if (!user) return;
 
-        const positions = await getAll('SELECT * FROM positions WHERE user_id = $1', [userId]);
-        const enriched = positions.map(p => {
-            const priceData = engine.getPrice(p.ticker);
-            const currentPrice = priceData?.price || p.avg_cost;
-            const marketValue = p.qty * currentPrice;
-            const unrealizedPnl = marketValue - p.qty * p.avg_cost;
-            return {
-                ...p, currentPrice: +currentPrice.toFixed(2), marketValue: +marketValue.toFixed(2),
-                unrealizedPnl: +unrealizedPnl.toFixed(2),
-                pnlPct: p.avg_cost ? +(((currentPrice - p.avg_cost) / p.avg_cost) * 100).toFixed(2) : 0
-            };
-        });
+    const positions = await stmts.getUserPositions.all(userId);
+    const enriched = positions.map(p => {
+        const priceData = engine.getPrice(p.ticker);
+        const currentPrice = priceData?.price || p.avg_cost;
+        const marketValue = p.qty * currentPrice;
+        const unrealizedPnl = marketValue - p.qty * p.avg_cost;
+        return {
+            ...p, currentPrice, marketValue: +marketValue.toFixed(2),
+            unrealizedPnl: +unrealizedPnl.toFixed(2),
+            pnlPct: p.avg_cost ? +(((currentPrice - p.avg_cost) / p.avg_cost) * 100).toFixed(2) : 0
+        };
+    });
 
-        const openOrders = await getAll("SELECT * FROM orders WHERE user_id = $1 AND status = 'open'", [userId]);
+    const openOrders = await stmts.getOpenOrders.all(userId);
 
-        sendJSON(ws, {
-            type: 'portfolio',
-            cash: user.cash,
-            positions: enriched,
-            openOrders
-        });
-    } catch (e) {
-        console.error('Portfolio Update Error:', e);
-    }
+    sendJSON(ws, {
+        type: 'portfolio',
+        cash: user.cash,
+        positions: enriched,
+        openOrders
+    });
 }
 
 async function broadcastOrderBooks() {
@@ -198,27 +210,23 @@ async function broadcastOrderBooks() {
     for (const [ws, state] of clients) {
         if (ws.readyState !== WebSocket.OPEN || !state.authenticated) continue;
         if (state.subscriptions.has('all')) {
-            // Only send top-10 most popular tickers for 'all' to save bandwidth
+            // Only send top-5 most popular tickers
             engine.TICKER_LIST.slice(0, 10).forEach(t => tickers.add(t));
         } else {
             state.subscriptions.forEach(t => tickers.add(t));
         }
     }
 
-    try {
-        for (const ticker of tickers) {
-            const userOrders = await getAll("SELECT * FROM orders WHERE ticker = $1 AND status = 'open'", [ticker]);
-            const book = orderbook.generateBook(ticker, userOrders);
+    for (const ticker of tickers) {
+        const userOrders = await stmts.getOpenOrdersByTicker.all(ticker);
+        const book = orderbook.generateBook(ticker, userOrders);
 
-            for (const [ws, state] of clients) {
-                if (ws.readyState !== WebSocket.OPEN || !state.authenticated) continue;
-                if (state.subscriptions.has(ticker) || state.subscriptions.has('all')) {
-                    sendJSON(ws, { type: 'orderbook', data: book });
-                }
+        for (const [ws, state] of clients) {
+            if (ws.readyState !== WebSocket.OPEN || !state.authenticated) continue;
+            if (state.subscriptions.has(ticker) || state.subscriptions.has('all')) {
+                sendJSON(ws, { type: 'orderbook', data: book });
             }
         }
-    } catch (e) {
-        console.error('Broadcast Orderbook Error:', e);
     }
 }
 
@@ -226,14 +234,14 @@ function broadcast(msg) {
     const payload = JSON.stringify(msg);
     for (const [ws, state] of clients) {
         if (ws.readyState === WebSocket.OPEN && state.authenticated) {
-            try { ws.send(payload); } catch (e) { }
+            ws.send(payload);
         }
     }
 }
 
 function sendJSON(ws, obj) {
     if (ws.readyState === WebSocket.OPEN) {
-        try { ws.send(JSON.stringify(obj)); } catch (e) { }
+        ws.send(JSON.stringify(obj));
     }
 }
 

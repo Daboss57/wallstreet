@@ -1,13 +1,8 @@
-const { v4: uuid } = require('uuid');
-const { batchUpsertCandles, batchUpsertPriceStates, getAll } = require('./db');
-// Matcher is required but not directly used in the sync loop to avoid circular ref issues or blocking
-// but we will use it via callbacks or dependency injection if needed.
-// However, the original code had require('./matcher');
-const matcher = require('./matcher');
+const { stmts, batchUpsertCandles, batchUpsertPriceStates, isDbUnavailableError } = require('./db');
 
 // ─── Ticker Definitions (30+ instruments across 7 asset classes) ───────────────
 const TICKERS = {
-    // Stocks — Tech / Blue Chip
+    // Stocks — Large Cap
     AAPL: { name: 'Apricot Corp', class: 'Stock', sector: 'Tech', basePrice: 185, volatility: 0.018, drift: 0.0001, meanRev: 0.002 },
     MSFT: { name: 'MegaSoft', class: 'Stock', sector: 'Tech', basePrice: 420, volatility: 0.016, drift: 0.00012, meanRev: 0.002 },
     NVDA: { name: 'NeuraVolt', class: 'Stock', sector: 'Tech', basePrice: 875, volatility: 0.032, drift: 0.0002, meanRev: 0.0015 },
@@ -61,6 +56,9 @@ const INTERVALS = {
 let tickCount = 0;
 let newsCallback = null;  // set by wsServer to broadcast news
 let tickCallback = null;  // set by wsServer to broadcast ticks
+let paused = false;
+let tickInFlight = false;
+let lastDbWriteErrorLogAt = 0;
 
 // ─── Gaussian random via Box-Muller ────────────────────────────────────────────
 function gaussianRandom() {
@@ -75,9 +73,11 @@ async function initPrices() {
     // Try to restore from DB
     let saved = [];
     try {
-        saved = await getAll('SELECT * FROM price_state');
-    } catch (e) { console.error('Error loading price states:', e.message); }
-
+        saved = await stmts.getAllPriceStates.all();
+    } catch (error) {
+        if (!isDbUnavailableError(error)) throw error;
+        logDbWriteError('[Engine] Price state restore failed', error);
+    }
     const savedMap = {};
     for (const s of saved) savedMap[s.ticker] = s;
 
@@ -125,7 +125,16 @@ function initCandleBuffers(ticker, now) {
 }
 
 // ─── Core Tick Function ────────────────────────────────────────────────────────
-function tick() {
+function logDbWriteError(prefix, error) {
+    const now = Date.now();
+    if (now - lastDbWriteErrorLogAt < 15000) return;
+    lastDbWriteErrorLogAt = now;
+    console.error(`${prefix}:`, error.message);
+}
+
+async function tick() {
+    if (paused) return [];
+
     const now = Date.now();
     tickCount++;
     const tickData = [];
@@ -238,14 +247,30 @@ function tick() {
 
     // Batch save to DB every 5 ticks for performance
     if (tickCount % 5 === 0) {
-        if (candlesToSave.length > 0) batchUpsertCandles(candlesToSave).catch(e => console.error(e));
-        batchUpsertPriceStates(priceStates).catch(e => console.error(e));
+        try {
+            if (candlesToSave.length > 0) await batchUpsertCandles(candlesToSave);
+            await batchUpsertPriceStates(priceStates);
+        } catch (e) {
+            if (isDbUnavailableError(e)) logDbWriteError('[Engine] DB save error', e);
+            else console.error('[Engine] DB save error:', e.message);
+        }
     } else if (candlesToSave.length > 0) {
-        batchUpsertCandles(candlesToSave).catch(e => console.error(e));
+        try {
+            await batchUpsertCandles(candlesToSave);
+        } catch (e) {
+            if (isDbUnavailableError(e)) logDbWriteError('[Engine] Candle save error', e);
+            else console.error('[Engine] Candle save error:', e.message);
+        }
     }
 
     // Broadcast ticks
-    if (tickCallback) tickCallback(tickData);
+    if (tickCallback) {
+        try {
+            tickCallback(tickData);
+        } catch (error) {
+            console.error('[Engine] Tick callback error:', error.message);
+        }
+    }
 
     return tickData;
 }
@@ -302,32 +327,67 @@ function getNewsCallback() { return newsCallback; }
 // ─── Start Engine ──────────────────────────────────────────────────────────────
 let engineInterval = null;
 
-function start() {
-    initPrices();
+async function start() {
+    await initPrices();
     console.log(`[Engine] Initialized ${TICKER_LIST.length} tickers`);
-    engineInterval = setInterval(tick, 1000);
+    engineInterval = setInterval(() => {
+        if (paused || tickInFlight) return;
+        tickInFlight = true;
+        tick()
+            .catch((error) => {
+                if (isDbUnavailableError(error)) logDbWriteError('[Engine] Tick DB error', error);
+                else console.error('[Engine] Tick error:', error.message);
+            })
+            .finally(() => {
+                tickInFlight = false;
+            });
+    }, 1000);
     console.log('[Engine] Running — 1 second tick rate');
 }
 
-function stop() {
+function pause(reason = 'db_unavailable') {
+    if (paused) return;
+    paused = true;
+    console.warn(`[Engine] Paused background ticks (${reason})`);
+}
+
+function resume() {
+    if (!paused) return;
+    paused = false;
+    console.log('[Engine] Resumed background ticks');
+}
+
+function isPaused() {
+    return paused;
+}
+
+async function stop() {
     if (engineInterval) clearInterval(engineInterval);
     // Final save
     const priceStates = TICKER_LIST.map(ticker => {
         const s = prices[ticker];
+        if (!s) return null;
         return {
             ticker, price: s.price, bid: s.bid, ask: s.ask,
             open: s.open, high: s.high, low: s.low,
             prevClose: s.prevClose, volume: s.volume,
             volatility: s.volatility, updatedAt: Date.now()
         };
-    });
-    batchUpsertPriceStates(priceStates);
+    }).filter(Boolean);
+    try {
+        await batchUpsertPriceStates(priceStates);
+    } catch (error) {
+        if (!isDbUnavailableError(error)) {
+            console.error('[Engine] Final state save failed:', error.message);
+        }
+    }
     console.log('[Engine] Stopped — final state saved');
 }
 
 module.exports = {
     TICKERS, TICKER_LIST, INTERVALS,
     start, stop, tick,
+    pause, resume, isPaused,
     getPrice, getAllPrices, getTickerDef, getAllTickerDefs,
     getCurrentCandle, addOrderFlowImpact, applyNewsShock,
     setTickCallback, setNewsCallback, getNewsCallback,
