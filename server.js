@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const rateLimit = require('express-rate-limit');
 
 const apiRouter = require('./src/api');
 const engine = require('./src/engine');
@@ -22,6 +23,25 @@ const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 const DB_HEALTH_CHECK_INTERVAL_MS = Number.parseInt(process.env.DB_HEALTH_CHECK_INTERVAL_MS || '10000', 10);
 const PAUSE_BACKGROUND_ON_DB_DOWN = ['1', 'true', 'yes', 'on'].includes(String(process.env.PAUSE_BACKGROUND_ON_DB_DOWN || 'true').toLowerCase());
+
+// Rate limiting configuration
+// Stricter limits for authentication endpoints (prevent brute force)
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // 10 requests per window per IP
+    message: { error: 'Too many authentication attempts, please try again later' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// General API rate limiting
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // 100 requests per window per IP
+    message: { error: 'Too many requests, please try again later' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
 
 let dbMonitorInterval = null;
 let backgroundPaused = false;
@@ -113,6 +133,13 @@ app.get('/diag/db', (req, res) => {
         backgroundPaused,
     });
 });
+
+// Apply rate limiting to API routes
+// Auth routes get stricter limiting
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+// General API limiting (applied after auth-specific limiters)
+app.use('/api', apiLimiter);
 
 app.use('/api', apiRouter);
 

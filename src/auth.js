@@ -3,7 +3,14 @@ const bcrypt = require('bcryptjs');
 const { v4: uuid } = require('uuid');
 const { stmts } = require('./db');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'streetos-secret-key-change-in-prod';
+// SECURITY: JWT_SECRET must be set via environment variable - no fallback allowed
+if (!process.env.JWT_SECRET) {
+    throw new Error(
+        'FATAL: JWT_SECRET environment variable is not set. ' +
+        'Set it before starting the server: export JWT_SECRET=<your-secret>'
+    );
+}
+const JWT_SECRET = process.env.JWT_SECRET;
 const STARTING_CASH = 100000;
 
 async function register(username, password) {
