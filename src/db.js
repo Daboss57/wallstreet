@@ -127,6 +127,7 @@ const SQL = {
     getAllUsers: 'SELECT id, username, cash, starting_cash, role, created_at FROM users',
     getPosition: 'SELECT * FROM positions WHERE user_id = $1 AND ticker = $2',
     getUserPositions: 'SELECT * FROM positions WHERE user_id = $1',
+    getAllPositions: 'SELECT * FROM positions',
     upsertPosition: `
         INSERT INTO positions (id, user_id, ticker, qty, avg_cost, opened_at)
         VALUES ($1, $2, $3, $4, $5, $6)
@@ -154,6 +155,7 @@ const SQL = {
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     `,
     getUserTrades: 'SELECT * FROM trades WHERE user_id = $1 ORDER BY executed_at DESC LIMIT $2',
+    getAllTrades: 'SELECT * FROM trades ORDER BY user_id, executed_at DESC',
     upsertCandle: `
         INSERT INTO candles (ticker, "interval", open_time, open, high, low, close, volume)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -242,6 +244,7 @@ const stmts = {
     getAllUsers: makeStatement('getAllUsers', SQL.getAllUsers),
     getPosition: makeStatement('getPosition', SQL.getPosition),
     getUserPositions: makeStatement('getUserPositions', SQL.getUserPositions),
+    getAllPositions: makeStatement('getAllPositions', SQL.getAllPositions),
     upsertPosition: makeStatement('upsertPosition', SQL.upsertPosition),
     deletePosition: makeStatement('deletePosition', SQL.deletePosition),
     insertOrder: makeStatement('insertOrder', SQL.insertOrder),
@@ -255,6 +258,7 @@ const stmts = {
     getOrderById: makeStatement('getOrderById', SQL.getOrderById),
     insertTrade: makeStatement('insertTrade', SQL.insertTrade),
     getUserTrades: makeStatement('getUserTrades', SQL.getUserTrades),
+    getAllTrades: makeStatement('getAllTrades', SQL.getAllTrades),
     upsertCandle: makeStatement('upsertCandle', SQL.upsertCandle),
     getCandles: makeStatement('getCandles', SQL.getCandles),
     insertNews: makeStatement('insertNews', SQL.insertNews),

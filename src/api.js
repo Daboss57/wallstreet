@@ -234,11 +234,41 @@ router.get('/trades', authenticate, asyncRoute(async (req, res) => {
 
 // Leaderboard
 router.get('/leaderboard', asyncRoute(async (req, res) => {
-    const users = await stmts.getAllUsers.all();
+    // Fetch all data in 3 queries instead of N+1
+    const [users, allPositions, allTrades] = await Promise.all([
+        stmts.getAllUsers.all(),
+        stmts.getAllPositions.all(),
+        stmts.getAllTrades.all(),
+    ]);
+
+    // Group positions by user_id
+    const positionsByUser = new Map();
+    for (const pos of allPositions) {
+        if (!positionsByUser.has(pos.user_id)) {
+            positionsByUser.set(pos.user_id, []);
+        }
+        positionsByUser.get(pos.user_id).push(pos);
+    }
+
+    // Group trades by user_id (keep only first 200 per user for badge calculations)
+    const tradesByUser = new Map();
+    const userTradeCounts = new Map();
+    for (const trade of allTrades) {
+        if (!tradesByUser.has(trade.user_id)) {
+            tradesByUser.set(trade.user_id, []);
+            userTradeCounts.set(trade.user_id, 0);
+        }
+        const count = userTradeCounts.get(trade.user_id);
+        if (count < 200) {
+            tradesByUser.get(trade.user_id).push(trade);
+            userTradeCounts.set(trade.user_id, count + 1);
+        }
+    }
+
     const leaderboard = [];
 
     for (const user of users) {
-        const positions = await stmts.getUserPositions.all(user.id);
+        const positions = positionsByUser.get(user.id) || [];
         let positionsValue = 0;
         for (const position of positions) {
             const priceData = engine.getPrice(position.ticker);
@@ -254,7 +284,7 @@ router.get('/leaderboard', asyncRoute(async (req, res) => {
         if (totalValue < user.starting_cash * 0.3) badges.push('💀');
         if (allTimeReturn > 400) badges.push('🚀');
 
-        const trades = await stmts.getUserTrades.all(user.id, 200);
+        const trades = tradesByUser.get(user.id) || [];
         if (trades.length >= 100) badges.push('🔥');
 
         let streak = 0;
