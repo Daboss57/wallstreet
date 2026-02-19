@@ -6,6 +6,8 @@ const engine = require('./engine');
 const orderbook = require('./orderbook');
 
 const router = express.Router();
+const MAX_ORDER_NOTIONAL_FRACTION = Math.max(0.05, Math.min(1, Number.parseFloat(process.env.MAX_ORDER_NOTIONAL_FRACTION || '0.35')));
+const MIN_ORDER_NOTIONAL = Math.max(1, Number.parseFloat(process.env.MIN_ORDER_NOTIONAL || '50'));
 
 function handleRouteError(res, error, defaultStatus = 500) {
     if (isDbUnavailableError(error)) {
@@ -131,6 +133,32 @@ router.post('/orders', authenticate, asyncRoute(async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const priceData = engine.getPrice(ticker.toUpperCase());
+    const referencePrice = type === 'limit'
+        ? Number(limitPrice)
+        : type === 'stop' || type === 'stop-loss' || type === 'take-profit'
+            ? Number(stopPrice || priceData?.price)
+            : Number(priceData?.ask || priceData?.price || limitPrice || stopPrice);
+    const estimatedNotional = Number(qty) * referencePrice;
+
+    if (!Number.isFinite(referencePrice) || referencePrice <= 0) {
+        return res.status(400).json({ error: 'Unable to price order for validation' });
+    }
+    if (!Number.isFinite(estimatedNotional) || estimatedNotional <= 0) {
+        return res.status(400).json({ error: 'Invalid order notional' });
+    }
+    if (estimatedNotional < MIN_ORDER_NOTIONAL) {
+        return res.status(400).json({ error: `Order notional must be at least $${MIN_ORDER_NOTIONAL.toFixed(2)}` });
+    }
+
+    if (side === 'buy') {
+        const maxOrderNotional = user.cash * MAX_ORDER_NOTIONAL_FRACTION;
+        if (estimatedNotional > maxOrderNotional) {
+            return res.status(400).json({
+                error: `Order too large. Max per order is ${(MAX_ORDER_NOTIONAL_FRACTION * 100).toFixed(0)}% of cash ($${maxOrderNotional.toFixed(2)}).`,
+            });
+        }
+    }
+
     if (side === 'buy' && type === 'market' && priceData) {
         const estimatedCost = qty * priceData.ask;
         if (estimatedCost > user.cash) {

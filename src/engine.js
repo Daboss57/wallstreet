@@ -1,5 +1,65 @@
 const { stmts, batchUpsertCandles, batchUpsertPriceStates, isDbUnavailableError } = require('./db');
 
+function boundedFloat(value, fallback, min, max) {
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+}
+
+function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}
+
+const MARKET_VOLATILITY_MULTIPLIER = boundedFloat(process.env.MARKET_VOLATILITY_MULTIPLIER, 0.35, 0.05, 2.0);
+const MARKET_SHOCK_MULTIPLIER = boundedFloat(process.env.MARKET_SHOCK_MULTIPLIER, 0.55, 0.05, 2.0);
+const MARKET_SPREAD_MULTIPLIER = boundedFloat(process.env.MARKET_SPREAD_MULTIPLIER, 0.65, 0.05, 3.0);
+const MARKET_ORDER_FLOW_MULTIPLIER = boundedFloat(process.env.MARKET_ORDER_FLOW_MULTIPLIER, 0.4, 0.0, 3.0);
+const MARKET_GARCH_ALPHA = boundedFloat(process.env.MARKET_GARCH_ALPHA, 0.06, 0.01, 0.4);
+const MARKET_GARCH_BETA = boundedFloat(process.env.MARKET_GARCH_BETA, 0.9, 0.5, 0.99);
+const MARKET_VOL_MIN_FACTOR = boundedFloat(process.env.MARKET_VOL_MIN_FACTOR, 0.15, 0.01, 1.0);
+const MARKET_VOL_MAX_FACTOR = boundedFloat(process.env.MARKET_VOL_MAX_FACTOR, 1.75, 0.2, 10.0);
+const MARKET_NEWS_VOL_SPIKE_MULTIPLIER = boundedFloat(process.env.MARKET_NEWS_VOL_SPIKE_MULTIPLIER, 1.35, 1.0, 5.0);
+const MARKET_MIN_PRICE_FACTOR = boundedFloat(process.env.MARKET_MIN_PRICE_FACTOR, 0.55, 0.05, 2.0);
+const MARKET_MAX_PRICE_FACTOR = boundedFloat(process.env.MARKET_MAX_PRICE_FACTOR, 1.85, 1.0, 10.0);
+const MARKET_MAX_TICK_MOVE_PCT = boundedFloat(process.env.MARKET_MAX_TICK_MOVE_PCT, 0.0035, 0.0005, 0.05);
+const MARKET_MAX_NEWS_MOVE_PCT = boundedFloat(process.env.MARKET_MAX_NEWS_MOVE_PCT, 0.025, 0.002, 0.3);
+const MARKET_MEAN_REVERSION_MULTIPLIER = boundedFloat(process.env.MARKET_MEAN_REVERSION_MULTIPLIER, 2.5, 0.2, 10.0);
+const MARKET_ORDER_FLOW_DECAY = boundedFloat(process.env.MARKET_ORDER_FLOW_DECAY, 0.25, 0.01, 0.95);
+const MARKET_MAX_ORDER_FLOW_MOVE_PCT = boundedFloat(process.env.MARKET_MAX_ORDER_FLOW_MOVE_PCT, 0.0015, 0.0001, 0.05);
+
+function getRiskMultiplier(definition) {
+    if (definition.class === 'Crypto') return 1.35;
+    if (definition.class === 'Stock' && definition.sector === 'Meme') return 1.25;
+    if (definition.class === 'Future' && definition.sector === 'Volatility') return 1.4;
+    return 1.0;
+}
+
+function getVolatilityRange(definition) {
+    const risk = getRiskMultiplier(definition);
+    const scaledBase = definition.volatility * MARKET_VOLATILITY_MULTIPLIER;
+    return {
+        baseVolatility: scaledBase,
+        minVolatility: scaledBase * MARKET_VOL_MIN_FACTOR,
+        maxVolatility: scaledBase * MARKET_VOL_MAX_FACTOR * risk,
+    };
+}
+
+function getPriceBounds(definition) {
+    const risk = getRiskMultiplier(definition);
+    return {
+        minPrice: Math.max(0.01, definition.basePrice * MARKET_MIN_PRICE_FACTOR / risk),
+        maxPrice: definition.basePrice * MARKET_MAX_PRICE_FACTOR * risk,
+    };
+}
+
+function getMaxTickMovePct(definition) {
+    return MARKET_MAX_TICK_MOVE_PCT * getRiskMultiplier(definition);
+}
+
+function getMaxNewsMovePct(definition) {
+    return MARKET_MAX_NEWS_MOVE_PCT * getRiskMultiplier(definition);
+}
+
 // ─── Ticker Definitions (30+ instruments across 7 asset classes) ───────────────
 const TICKERS = {
     // Stocks — Large Cap
@@ -84,18 +144,27 @@ async function initPrices() {
     const now = Date.now();
     for (const ticker of TICKER_LIST) {
         const def = TICKERS[ticker];
+        const volRange = getVolatilityRange(def);
+        const priceBounds = getPriceBounds(def);
         const s = savedMap[ticker];
         if (s) {
+            const clampedPrice = clamp(s.price, priceBounds.minPrice, priceBounds.maxPrice);
+            const spread = clampedPrice * volRange.baseVolatility * 0.04;
             prices[ticker] = {
-                price: s.price, bid: s.bid, ask: s.ask,
-                open: s.open, high: s.high, low: s.low,
-                prevClose: s.prev_close, volume: s.volume,
-                volatility: s.volatility
+                price: clampedPrice,
+                bid: clamp(s.bid || clampedPrice - spread / 2, priceBounds.minPrice, priceBounds.maxPrice),
+                ask: clamp(s.ask || clampedPrice + spread / 2, priceBounds.minPrice, priceBounds.maxPrice),
+                open: clamp(s.open || clampedPrice, priceBounds.minPrice, priceBounds.maxPrice),
+                high: clamp(s.high || clampedPrice, priceBounds.minPrice, priceBounds.maxPrice),
+                low: clamp(s.low || clampedPrice, priceBounds.minPrice, priceBounds.maxPrice),
+                prevClose: clamp(s.prev_close || clampedPrice, priceBounds.minPrice, priceBounds.maxPrice),
+                volume: s.volume,
+                volatility: clamp(s.volatility, volRange.minVolatility, volRange.maxVolatility),
             };
         } else {
             // Fresh start — small random offset from base
             const startPrice = def.basePrice * (1 + (Math.random() - 0.5) * 0.02);
-            const spread = startPrice * def.volatility * 0.1;
+            const spread = startPrice * volRange.baseVolatility * 0.06;
             prices[ticker] = {
                 price: startPrice,
                 bid: startPrice - spread / 2,
@@ -105,7 +174,7 @@ async function initPrices() {
                 low: startPrice,
                 prevClose: startPrice,
                 volume: 0,
-                volatility: def.volatility
+                volatility: volRange.baseVolatility
             };
         }
         orderFlowImpact[ticker] = 0;
@@ -143,43 +212,49 @@ async function tick() {
 
     for (const ticker of TICKER_LIST) {
         const def = TICKERS[ticker];
+        const volRange = getVolatilityRange(def);
+        const priceBounds = getPriceBounds(def);
         const state = prices[ticker];
         const oldPrice = state.price;
 
         // ── GARCH volatility update ──
         const returnVal = oldPrice > 0 ? Math.log(state.price / (state.prevClose || state.price)) : 0;
-        const omega = def.volatility * def.volatility * 0.05;
-        const alpha = 0.1;
-        const beta = 0.85;
+        const omega = volRange.baseVolatility * volRange.baseVolatility * 0.03;
+        const alpha = MARKET_GARCH_ALPHA;
+        const beta = MARKET_GARCH_BETA;
         state.volatility = Math.sqrt(
             omega + alpha * returnVal * returnVal + beta * state.volatility * state.volatility
         );
         // Clamp volatility
-        const minVol = def.volatility * 0.3;
-        const maxVol = def.volatility * 5.0;
+        const minVol = volRange.minVolatility;
+        const maxVol = volRange.maxVolatility;
         state.volatility = Math.max(minVol, Math.min(maxVol, state.volatility));
 
         // ── Random drift (GBM) ──
         const drift = def.drift;
-        const shock = gaussianRandom() * state.volatility;
+        const shock = gaussianRandom() * state.volatility * MARKET_SHOCK_MULTIPLIER;
         let newPrice = oldPrice * Math.exp(drift + shock);
 
         // ── Mean reversion ──
         const deviation = (newPrice - def.basePrice) / def.basePrice;
-        newPrice -= deviation * def.meanRev * oldPrice;
+        newPrice -= deviation * def.meanRev * MARKET_MEAN_REVERSION_MULTIPLIER * oldPrice;
 
         // ── Order flow impact ──
         if (orderFlowImpact[ticker] !== 0) {
-            newPrice += orderFlowImpact[ticker];
-            orderFlowImpact[ticker] *= 0.5; // decay
-            if (Math.abs(orderFlowImpact[ticker]) < 0.001) orderFlowImpact[ticker] = 0;
+            const maxImpactAbs = oldPrice * MARKET_MAX_ORDER_FLOW_MOVE_PCT * getRiskMultiplier(def);
+            const appliedImpact = clamp(orderFlowImpact[ticker], -maxImpactAbs, maxImpactAbs);
+            newPrice += appliedImpact;
+            orderFlowImpact[ticker] *= MARKET_ORDER_FLOW_DECAY;
+            if (Math.abs(orderFlowImpact[ticker]) < oldPrice * 0.00005) orderFlowImpact[ticker] = 0;
         }
 
-        // Ensure price stays positive
-        newPrice = Math.max(newPrice, oldPrice * 0.5, 0.01);
+        // Hard movement/range guardrails to prevent crash-and-pump exploits.
+        const maxTickMove = oldPrice * getMaxTickMovePct(def);
+        newPrice = clamp(newPrice, oldPrice - maxTickMove, oldPrice + maxTickMove);
+        newPrice = clamp(newPrice, priceBounds.minPrice, priceBounds.maxPrice);
 
         // ── Update spread ──
-        const spread = newPrice * state.volatility * 0.08;
+        const spread = newPrice * state.volatility * 0.05 * MARKET_SPREAD_MULTIPLIER;
         state.price = +newPrice.toFixed(getDecimals(ticker));
         state.bid = +(newPrice - spread / 2).toFixed(getDecimals(ticker));
         state.ask = +(newPrice + spread / 2).toFixed(getDecimals(ticker));
@@ -187,7 +262,7 @@ async function tick() {
         state.low = Math.min(state.low, state.price);
 
         // ── Volume simulation ──
-        const tickVolume = Math.floor(Math.random() * 500 + 50) * (1 + state.volatility * 10);
+        const tickVolume = Math.floor(Math.random() * 500 + 50) * (1 + state.volatility * 4);
         state.volume += tickVolume;
 
         // ── Update candle buffers ──
@@ -287,17 +362,30 @@ function getDecimals(ticker) {
 function addOrderFlowImpact(ticker, side, notional) {
     const def = TICKERS[ticker];
     if (!def) return;
-    const impact = (notional / (def.basePrice * 10000)) * def.basePrice * 0.001;
-    orderFlowImpact[ticker] += side === 'buy' ? impact : -impact;
+    const state = prices[ticker];
+    const referencePrice = state?.price || def.basePrice;
+    const risk = getRiskMultiplier(def);
+
+    const liquidityNotional = Math.max(def.basePrice * 2_500_000, 20_000_000) * risk;
+    const rawImpactPct = (notional / liquidityNotional) * MARKET_ORDER_FLOW_MULTIPLIER * 0.01;
+    const maxImpactPct = MARKET_MAX_ORDER_FLOW_MOVE_PCT * risk;
+    const boundedImpactPct = clamp(rawImpactPct, -maxImpactPct, maxImpactPct);
+    const signedImpact = referencePrice * boundedImpactPct * (side === 'buy' ? 1 : -1);
+
+    const accumulatorCap = referencePrice * maxImpactPct * 2;
+    orderFlowImpact[ticker] = clamp((orderFlowImpact[ticker] || 0) + signedImpact, -accumulatorCap, accumulatorCap);
 }
 
 function applyNewsShock(ticker, impactPct) {
     const state = prices[ticker];
     if (!state) return;
-    state.price *= (1 + impactPct);
-    state.price = Math.max(state.price, 0.01);
+    const def = TICKERS[ticker];
+    const boundedImpactPct = clamp(impactPct, -getMaxNewsMovePct(def), getMaxNewsMovePct(def));
+    const bounds = getPriceBounds(def);
+    state.price = clamp(state.price * (1 + boundedImpactPct), bounds.minPrice, bounds.maxPrice);
     // Spike volatility
-    state.volatility = Math.min(state.volatility * 2.5, TICKERS[ticker].volatility * 5);
+    const volRange = getVolatilityRange(def);
+    state.volatility = Math.min(state.volatility * MARKET_NEWS_VOL_SPIKE_MULTIPLIER, volRange.maxVolatility);
 }
 
 function getPrice(ticker) {

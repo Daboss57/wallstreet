@@ -2,6 +2,22 @@ const { v4: uuid } = require('uuid');
 const { stmts, isDbUnavailableError } = require('./db');
 const engine = require('./engine');
 
+function boundedFloat(value, fallback, min, max) {
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+}
+
+function boundedInt(value, fallback, min, max) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+}
+
+const NEWS_IMPACT_MULTIPLIER = boundedFloat(process.env.NEWS_IMPACT_MULTIPLIER, 0.45, 0.05, 2.0);
+const NEWS_MIN_INTERVAL_MS = boundedInt(process.env.NEWS_MIN_INTERVAL_MS, 30000, 5000, 300000);
+const NEWS_MAX_INTERVAL_MS = boundedInt(process.env.NEWS_MAX_INTERVAL_MS, 180000, 10000, 600000);
+
 // ─── News Templates ────────────────────────────────────────────────────────────
 const TEMPLATES = {
     earnings_beat: {
@@ -157,8 +173,9 @@ let inFlight = false;
 let lastDbErrorLogAt = 0;
 
 function scheduleNext() {
-    // Random 15–90 seconds (compressed time — in production these would be 15–90 minutes)
-    nextNewsTime = Date.now() + (Math.random() * 75000 + 15000);
+    // Randomized cadence (defaults are calmer than the original profile).
+    const maxInterval = Math.max(NEWS_MAX_INTERVAL_MS, NEWS_MIN_INTERVAL_MS + 1);
+    nextNewsTime = Date.now() + (Math.random() * (maxInterval - NEWS_MIN_INTERVAL_MS) + NEWS_MIN_INTERVAL_MS);
 }
 
 function logDbError(error) {
@@ -198,7 +215,7 @@ async function generateEvent() {
     const headline = template.headline(tickerDef);
     const body = template.body(tickerDef);
     const [minImpact, maxImpact] = template.impactRange;
-    const impact = minImpact + Math.random() * (maxImpact - minImpact);
+    const impact = (minImpact + Math.random() * (maxImpact - minImpact)) * NEWS_IMPACT_MULTIPLIER;
 
     // Apply price shocks
     for (const t of affectedTickers) {

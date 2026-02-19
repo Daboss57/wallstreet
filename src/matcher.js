@@ -2,6 +2,15 @@ const { v4: uuid } = require('uuid');
 const { stmts, isDbUnavailableError } = require('./db');
 const engine = require('./engine');
 
+function boundedFloat(value, fallback, min, max) {
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+}
+
+const TRADING_FEE_RATE = boundedFloat(process.env.TRADING_FEE_RATE, 0.0025, 0, 0.05);
+const MIN_TRADE_FEE = boundedFloat(process.env.MIN_TRADE_FEE, 1.0, 0, 1000);
+
 let fillCallback = null;
 let paused = false;
 let lastDbErrorLogAt = 0;
@@ -199,8 +208,15 @@ async function executeFill(order, qty, price, now) {
 
     if (order.side === 'buy') {
         const totalRequired = qty * price;
+        const estimatedFee = Math.max(MIN_TRADE_FEE, totalRequired * TRADING_FEE_RATE);
         if (totalRequired > user.cash) {
-            qty = Math.floor(user.cash / price);
+            qty = Math.floor((user.cash - MIN_TRADE_FEE) / (price * (1 + TRADING_FEE_RATE)));
+            if (qty <= 0) {
+                await stmts.cancelOrder.run(now, order.id);
+                return;
+            }
+        } else if (totalRequired + estimatedFee > user.cash) {
+            qty = Math.floor((user.cash - MIN_TRADE_FEE) / (price * (1 + TRADING_FEE_RATE)));
             if (qty <= 0) {
                 await stmts.cancelOrder.run(now, order.id);
                 return;
@@ -209,7 +225,8 @@ async function executeFill(order, qty, price, now) {
     }
 
     const fillTotal = qty * price;
-    const newCash = order.side === 'buy' ? user.cash - fillTotal : user.cash + fillTotal;
+    const fee = Math.max(MIN_TRADE_FEE, fillTotal * TRADING_FEE_RATE);
+    const newCash = order.side === 'buy' ? user.cash - fillTotal - fee : user.cash + fillTotal - fee;
     await stmts.updateUserCash.run(+newCash.toFixed(2), order.user_id);
 
     const position = await stmts.getPosition.get(order.user_id, order.ticker);
@@ -231,7 +248,7 @@ async function executeFill(order, qty, price, now) {
             await stmts.upsertPosition.run(uuid(), order.user_id, order.ticker, qty, price, now);
         }
     } else if (position && position.qty > 0) {
-        pnl = (price - position.avg_cost) * Math.min(qty, position.qty);
+        pnl = (price - position.avg_cost) * Math.min(qty, position.qty) - fee;
         const newQty = position.qty - qty;
         if (Math.abs(newQty) < 0.0001) {
             await stmts.deletePosition.run(order.user_id, order.ticker);
@@ -294,6 +311,7 @@ async function executeFill(order, qty, price, now) {
             qty,
             price,
             total: fillTotal,
+            fee: +fee.toFixed(2),
             pnl: +pnl.toFixed(2),
             timestamp: now,
         });
