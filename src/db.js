@@ -110,6 +110,36 @@ CREATE TABLE IF NOT EXISTS price_state (
   updated_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
 );
 
+CREATE TABLE IF NOT EXISTS funds (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  owner_id TEXT NOT NULL REFERENCES users(id),
+  strategy_type TEXT NOT NULL,
+  description TEXT,
+  min_investment DOUBLE PRECISION NOT NULL DEFAULT 0,
+  management_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+  performance_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+  created_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
+);
+
+CREATE TABLE IF NOT EXISTS fund_members (
+  id TEXT PRIMARY KEY,
+  fund_id TEXT NOT NULL REFERENCES funds(id),
+  user_id TEXT NOT NULL REFERENCES users(id),
+  role TEXT NOT NULL,
+  joined_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint),
+  UNIQUE(fund_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS fund_capital (
+  id TEXT PRIMARY KEY,
+  fund_id TEXT NOT NULL REFERENCES funds(id),
+  user_id TEXT NOT NULL REFERENCES users(id),
+  amount DOUBLE PRECISION NOT NULL,
+  type TEXT NOT NULL,
+  created_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
+);
+
 CREATE INDEX IF NOT EXISTS idx_positions_user ON positions(user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_ticker_status ON orders(ticker, status);
@@ -117,6 +147,11 @@ CREATE INDEX IF NOT EXISTS idx_trades_user ON trades(user_id);
 CREATE INDEX IF NOT EXISTS idx_candles_lookup ON candles(ticker, "interval", open_time);
 CREATE INDEX IF NOT EXISTS idx_news_ticker ON news_events(ticker);
 CREATE INDEX IF NOT EXISTS idx_snapshots_user ON portfolio_snapshots(user_id, snapshot_at);
+CREATE INDEX IF NOT EXISTS idx_funds_owner ON funds(owner_id);
+CREATE INDEX IF NOT EXISTS idx_fund_members_fund ON fund_members(fund_id);
+CREATE INDEX IF NOT EXISTS idx_fund_members_user ON fund_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_fund_capital_fund ON fund_capital(fund_id);
+CREATE INDEX IF NOT EXISTS idx_fund_capital_user ON fund_capital(user_id, fund_id);
 `;
 
 const SQL = {
@@ -194,6 +229,29 @@ const SQL = {
         VALUES ($1, $2, $3, $4, $5)
     `,
     getUserSnapshots: 'SELECT * FROM portfolio_snapshots WHERE user_id = $1 ORDER BY snapshot_at DESC LIMIT $2',
+
+    // Fund CRUD
+    insertFund: 'INSERT INTO funds (id, name, owner_id, strategy_type, description, min_investment, management_fee, performance_fee, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+    getFundById: 'SELECT * FROM funds WHERE id = $1',
+    getFundsByOwner: 'SELECT * FROM funds WHERE owner_id = $1 ORDER BY created_at DESC',
+    getAllFunds: 'SELECT * FROM funds ORDER BY created_at DESC',
+    updateFund: 'UPDATE funds SET name = $1, strategy_type = $2, description = $3, min_investment = $4, management_fee = $5, performance_fee = $6 WHERE id = $7',
+    deleteFund: 'DELETE FROM funds WHERE id = $1',
+
+    // Fund Member CRUD
+    insertFundMember: 'INSERT INTO fund_members (id, fund_id, user_id, role, joined_at) VALUES ($1, $2, $3, $4, $5)',
+    getFundMember: 'SELECT * FROM fund_members WHERE fund_id = $1 AND user_id = $2',
+    getFundMembers: 'SELECT fm.*, u.username FROM fund_members fm JOIN users u ON fm.user_id = u.id WHERE fm.fund_id = $1 ORDER BY fm.joined_at DESC',
+    getUserFunds: 'SELECT f.*, fm.role FROM funds f JOIN fund_members fm ON f.id = fm.fund_id WHERE fm.user_id = $1 ORDER BY fm.joined_at DESC',
+    updateFundMemberRole: 'UPDATE fund_members SET role = $1 WHERE fund_id = $2 AND user_id = $3',
+    deleteFundMember: 'DELETE FROM fund_members WHERE fund_id = $1 AND user_id = $2',
+
+    // Fund Capital CRUD
+    insertFundCapital: 'INSERT INTO fund_capital (id, fund_id, user_id, amount, type, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
+    getFundCapitalById: 'SELECT * FROM fund_capital WHERE id = $1',
+    getFundCapitalTransactions: 'SELECT fc.*, u.username FROM fund_capital fc JOIN users u ON fc.user_id = u.id WHERE fc.fund_id = $1 ORDER BY fc.created_at DESC',
+    getUserCapitalInFund: 'SELECT * FROM fund_capital WHERE fund_id = $1 AND user_id = $2 ORDER BY created_at DESC',
+    getFundCapitalSummary: 'SELECT user_id, SUM(CASE WHEN type = $2 THEN amount ELSE -amount END) as total_capital FROM fund_capital WHERE fund_id = $1 GROUP BY user_id',
 };
 
 let dbInitialized = false;
@@ -269,6 +327,29 @@ const stmts = {
     getAllPriceStates: makeStatement('getAllPriceStates', SQL.getAllPriceStates),
     insertSnapshot: makeStatement('insertSnapshot', SQL.insertSnapshot),
     getUserSnapshots: makeStatement('getUserSnapshots', SQL.getUserSnapshots),
+
+    // Fund CRUD
+    insertFund: makeStatement('insertFund', SQL.insertFund),
+    getFundById: makeStatement('getFundById', SQL.getFundById),
+    getFundsByOwner: makeStatement('getFundsByOwner', SQL.getFundsByOwner),
+    getAllFunds: makeStatement('getAllFunds', SQL.getAllFunds),
+    updateFund: makeStatement('updateFund', SQL.updateFund),
+    deleteFund: makeStatement('deleteFund', SQL.deleteFund),
+
+    // Fund Member CRUD
+    insertFundMember: makeStatement('insertFundMember', SQL.insertFundMember),
+    getFundMember: makeStatement('getFundMember', SQL.getFundMember),
+    getFundMembers: makeStatement('getFundMembers', SQL.getFundMembers),
+    getUserFunds: makeStatement('getUserFunds', SQL.getUserFunds),
+    updateFundMemberRole: makeStatement('updateFundMemberRole', SQL.updateFundMemberRole),
+    deleteFundMember: makeStatement('deleteFundMember', SQL.deleteFundMember),
+
+    // Fund Capital CRUD
+    insertFundCapital: makeStatement('insertFundCapital', SQL.insertFundCapital),
+    getFundCapitalById: makeStatement('getFundCapitalById', SQL.getFundCapitalById),
+    getFundCapitalTransactions: makeStatement('getFundCapitalTransactions', SQL.getFundCapitalTransactions),
+    getUserCapitalInFund: makeStatement('getUserCapitalInFund', SQL.getUserCapitalInFund),
+    getFundCapitalSummary: makeStatement('getFundCapitalSummary', SQL.getFundCapitalSummary),
 };
 
 async function runInTransaction(operationName, transactionFn) {
