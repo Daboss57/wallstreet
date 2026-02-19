@@ -141,21 +141,21 @@ CREATE TABLE IF NOT EXISTS fund_capital (
 );
 
 CREATE TABLE IF NOT EXISTS strategies (
-  id BIGSERIAL PRIMARY KEY,
+  id TEXT PRIMARY KEY,
   fund_id TEXT NOT NULL REFERENCES funds(id),
   name TEXT NOT NULL,
-  type TEXT NOT NULL,
-  config JSONB,
+  type TEXT NOT NULL CHECK (type IN ('mean_reversion', 'momentum', 'grid', 'pairs', 'custom')),
+  config JSONB NOT NULL DEFAULT '{}',
   is_active BOOLEAN NOT NULL DEFAULT true,
   created_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint),
   updated_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
 );
 
 CREATE TABLE IF NOT EXISTS strategy_trades (
-  id BIGSERIAL PRIMARY KEY,
-  strategy_id BIGINT NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  id TEXT PRIMARY KEY,
+  strategy_id TEXT NOT NULL REFERENCES strategies(id),
   ticker TEXT NOT NULL,
-  side TEXT NOT NULL,
+  side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
   quantity INTEGER NOT NULL,
   price INTEGER NOT NULL,
   executed_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
@@ -174,7 +174,7 @@ CREATE INDEX IF NOT EXISTS idx_fund_members_user ON fund_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_fund_capital_fund ON fund_capital(fund_id);
 CREATE INDEX IF NOT EXISTS idx_fund_capital_user ON fund_capital(user_id, fund_id);
 CREATE INDEX IF NOT EXISTS idx_strategies_fund ON strategies(fund_id);
-CREATE INDEX IF NOT EXISTS idx_strategies_active ON strategies(is_active);
+CREATE INDEX IF NOT EXISTS idx_strategies_type ON strategies(type);
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_strategy ON strategy_trades(strategy_id);
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_ticker ON strategy_trades(ticker);
 `;
@@ -279,7 +279,7 @@ const SQL = {
     getFundCapitalSummary: 'SELECT user_id, SUM(CASE WHEN type = $2 THEN amount ELSE -amount END) as total_capital FROM fund_capital WHERE fund_id = $1 GROUP BY user_id',
 
     // Strategy CRUD
-    insertStrategy: 'INSERT INTO strategies (fund_id, name, type, config, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+    insertStrategy: 'INSERT INTO strategies (id, fund_id, name, type, config, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
     getStrategyById: 'SELECT * FROM strategies WHERE id = $1',
     getStrategiesByFund: 'SELECT * FROM strategies WHERE fund_id = $1 ORDER BY created_at DESC',
     getActiveStrategies: 'SELECT * FROM strategies WHERE is_active = true ORDER BY created_at DESC',
@@ -287,7 +287,7 @@ const SQL = {
     deleteStrategy: 'DELETE FROM strategies WHERE id = $1',
 
     // Strategy Trade CRUD
-    insertStrategyTrade: 'INSERT INTO strategy_trades (strategy_id, ticker, side, quantity, price, executed_at) VALUES ($1, $2, $3, $4, $5, $6)',
+    insertStrategyTrade: 'INSERT INTO strategy_trades (id, strategy_id, ticker, side, quantity, price, executed_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
     getStrategyTrades: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 ORDER BY executed_at DESC LIMIT $2',
     getStrategyTradesByTicker: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 AND ticker = $2 ORDER BY executed_at DESC',
 };
