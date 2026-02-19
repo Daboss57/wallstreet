@@ -294,19 +294,37 @@ async function runInTransaction(operationName, transactionFn) {
 
 async function batchUpsertCandles(candles) {
     if (!Array.isArray(candles) || candles.length === 0) return;
-    await runInTransaction('batchUpsertCandles', async (client) => {
-        for (const candle of candles) {
-            await client.query(SQL.upsertCandle, [
-                candle.ticker,
-                candle.interval,
-                candle.openTime,
-                candle.open,
-                candle.high,
-                candle.low,
-                candle.close,
-                candle.volume,
-            ]);
-        }
+    
+    const sql = `
+        INSERT INTO candles (ticker, "interval", open_time, open, high, low, close, volume)
+        SELECT * FROM UNNEST(
+            $1::text[],
+            $2::text[],
+            $3::bigint[],
+            $4::double precision[],
+            $5::double precision[],
+            $6::double precision[],
+            $7::double precision[],
+            $8::double precision[]
+        )
+        ON CONFLICT(ticker, "interval", open_time) DO UPDATE SET
+            high = GREATEST(candles.high, EXCLUDED.high),
+            low = LEAST(candles.low, EXCLUDED.low),
+            close = EXCLUDED.close,
+            volume = candles.volume + EXCLUDED.volume
+    `;
+    
+    await withDbRetry('batchUpsertCandles', async ({ pool }) => {
+        await pool.query(sql, [
+            candles.map(c => c.ticker),
+            candles.map(c => c.interval),
+            candles.map(c => c.openTime),
+            candles.map(c => c.open),
+            candles.map(c => c.high),
+            candles.map(c => c.low),
+            candles.map(c => c.close),
+            candles.map(c => c.volume),
+        ]);
     });
 }
 
