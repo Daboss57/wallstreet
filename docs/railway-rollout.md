@@ -19,6 +19,13 @@
 4. Run login flow and place one order.
 5. Confirm no repeated `ENETUNREACH` spam in Railway logs.
 
+## TLS Certificate Chain Troubleshooting
+If health shows `lastErrorCode: SELF_SIGNED_CERT_IN_CHAIN`:
+1. Set `DB_CONNECT_MODE=pooler`.
+2. Set `DB_SSL_REJECT_UNAUTHORIZED=false` (temporary compatibility mode).
+3. Redeploy and verify `GET /readyz` shows `db.connected: true`.
+4. Later, re-enable strict TLS by setting `DB_SSL_REJECT_UNAUTHORIZED=true` once a trusted CA chain is provided.
+
 ## Fallback Validation
 1. Temporarily break direct DB connectivity.
 2. Verify `db.mode` shifts to `pooler` in health responses.

@@ -12,6 +12,7 @@ const {
     closeDb,
     probeDb,
     getDbStatus,
+    getDbDiagnostics,
     isDbHealthy,
 } = require('./src/db');
 
@@ -75,20 +76,22 @@ app.use((req, res, next) => {
 });
 
 app.get('/healthz', (req, res) => {
-    const db = getDbStatus();
+    const db = getDbDiagnostics();
     res.json({
         status: 'ok',
         db: {
             connected: db.connected,
             mode: db.mode,
             lastErrorCode: db.lastErrorCode,
+            lastErrorMessage: db.lastErrorMessage,
+            config: db.config,
         },
         backgroundPaused,
     });
 });
 
 app.get('/readyz', (req, res) => {
-    const db = getDbStatus();
+    const db = getDbDiagnostics();
     const ready = db.connected;
     res.status(ready ? 200 : 503).json({
         status: ready ? 'ready' : 'not_ready',
@@ -96,7 +99,18 @@ app.get('/readyz', (req, res) => {
             connected: db.connected,
             mode: db.mode,
             lastErrorCode: db.lastErrorCode,
+            lastErrorMessage: db.lastErrorMessage,
+            config: db.config,
         },
+    });
+});
+
+app.get('/diag/db', (req, res) => {
+    const db = getDbDiagnostics();
+    res.status(db.connected ? 200 : 503).json({
+        status: db.connected ? 'connected' : 'disconnected',
+        db,
+        backgroundPaused,
     });
 });
 

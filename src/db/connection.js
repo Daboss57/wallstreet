@@ -119,6 +119,26 @@ function getDbStatus() {
     return { ...status };
 }
 
+function getDbDiagnostics() {
+    return {
+        ...status,
+        config: {
+            defaultMode: DEFAULT_CONNECT_MODE,
+            activeMode,
+            fallbackEnabled: DB_FALLBACK_ENABLED,
+            hasDirectUrl: Boolean(DIRECT_URL),
+            hasPoolerUrl: Boolean(POOLER_URL),
+            sslRejectUnauthorized: DB_SSL_REJECT_UNAUTHORIZED,
+            sslDisabled: DB_SSL_DISABLED,
+            connectTimeoutMs: DB_CONNECT_TIMEOUT_MS,
+            retryMaxAttempts: DB_RETRY_MAX_ATTEMPTS,
+            retryBaseMs: DB_RETRY_BASE_MS,
+            retryMaxMs: DB_RETRY_MAX_MS,
+            directRetryCooldownMs: DB_DIRECT_RETRY_COOLDOWN_MS,
+        },
+    };
+}
+
 function isDbHealthy() {
     return status.connected;
 }
@@ -244,6 +264,10 @@ async function initDb() {
     if (initialized) return getDbStatus();
     ensureConfigured();
 
+    console.log(
+        `[DB] Config: defaultMode=${DEFAULT_CONNECT_MODE}, fallback=${DB_FALLBACK_ENABLED}, hasDirectUrl=${Boolean(DIRECT_URL)}, hasPoolerUrl=${Boolean(POOLER_URL)}, sslDisabled=${DB_SSL_DISABLED}, sslRejectUnauthorized=${DB_SSL_REJECT_UNAUTHORIZED}`
+    );
+
     await Promise.all([
         logHostResolution('direct', DIRECT_URL),
         logHostResolution('pooler', POOLER_URL),
@@ -291,6 +315,7 @@ module.exports = {
     closeDb,
     onDbStatusChange,
     getDbStatus,
+    getDbDiagnostics,
     isDbHealthy,
     isDbUnavailableError,
 };
