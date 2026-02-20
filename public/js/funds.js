@@ -1306,6 +1306,17 @@ const Funds = {
                 <label>Pair Ticker</label>
                 <select id="strategy-ticker2">${this.tickerOptionsHtml('MSFT')}</select>
               </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Allocation % of Fund NAV</label>
+                  <input type="number" id="strategy-allocation-pct" value="10" min="0.1" step="0.1">
+                  <small class="form-hint">No max cap. Quantity is price-aware: qty = (NAV x %)/price</small>
+                </div>
+                <div class="form-group">
+                  <label>Fixed Notional USD (Optional)</label>
+                  <input type="number" id="strategy-fixed-notional" placeholder="Leave blank to use allocation % (e.g. 10000)" min="0" step="1">
+                </div>
+              </div>
             </div>
 
             <div id="custom-code-section" style="display:none">
@@ -1381,7 +1392,16 @@ const Funds = {
         });
       } else {
         const ticker = document.getElementById('strategy-ticker')?.value;
-        const config = { ticker };
+        const allocationPctRaw = parseFloat(document.getElementById('strategy-allocation-pct')?.value);
+        const fixedNotionalRaw = parseFloat(document.getElementById('strategy-fixed-notional')?.value);
+
+        const config = {
+          ticker,
+          allocationPct: Number.isFinite(allocationPctRaw) && allocationPctRaw > 0 ? allocationPctRaw : 10
+        };
+        if (Number.isFinite(fixedNotionalRaw) && fixedNotionalRaw > 0) {
+          config.fixedNotionalUsd = fixedNotionalRaw;
+        }
 
         if (type === 'pairs') {
           const ticker2 = document.getElementById('strategy-ticker2')?.value;
@@ -1423,7 +1443,7 @@ const Funds = {
     if (!strategy) return;
 
     const config = typeof strategy.config === 'string' ? JSON.parse(strategy.config) : (strategy.config || {});
-    const parameters = typeof strategy.parameters === 'string' ? JSON.parse(strategy.parameters) : (strategy.parameters || {});
+    const isPairs = strategy.type === 'pairs';
 
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
@@ -1448,14 +1468,24 @@ const Funds = {
           <div class="form-group">
             <label>Target Ticker</label>
             <select id="strategy-ticker">
-              <option value="AAPL" ${config.ticker === 'AAPL' ? 'selected' : ''}>AAPL - Apple</option>
-              <option value="GOOGL" ${config.ticker === 'GOOGL' ? 'selected' : ''}>GOOGL - Google</option>
-              <option value="MSFT" ${config.ticker === 'MSFT' ? 'selected' : ''}>MSFT - Microsoft</option>
-              <option value="TSLA" ${config.ticker === 'TSLA' ? 'selected' : ''}>TSLA - Tesla</option>
-              <option value="AMZN" ${config.ticker === 'AMZN' ? 'selected' : ''}>AMZN - Amazon</option>
-              <option value="BTC" ${config.ticker === 'BTC' ? 'selected' : ''}>BTC - Bitcoin</option>
-              <option value="ETH" ${config.ticker === 'ETH' ? 'selected' : ''}>ETH - Ethereum</option>
+              ${this.tickerOptionsHtml(config.ticker || 'AAPL')}
             </select>
+          </div>
+          ${isPairs ? `
+          <div class="form-group">
+            <label>Pair Ticker</label>
+            <select id="strategy-ticker2">${this.tickerOptionsHtml(config.ticker2 || 'MSFT')}</select>
+          </div>
+          ` : ''}
+          <div class="form-row">
+            <div class="form-group">
+              <label>Allocation % of Fund NAV</label>
+              <input type="number" id="strategy-allocation-pct" value="${(Number(config.allocationPct) > 0 ? Number(config.allocationPct) : 10)}" min="0.1" step="0.1">
+            </div>
+            <div class="form-group">
+              <label>Fixed Notional USD (Optional)</label>
+              <input type="number" id="strategy-fixed-notional" value="${Number(config.fixedNotionalUsd) > 0 ? Number(config.fixedNotionalUsd) : ''}" min="0" step="1">
+            </div>
           </div>
           `}
           <div class="form-group">
@@ -1489,10 +1519,32 @@ const Funds = {
           is_active: isActive
         });
       } else {
+        const existing = this.strategies.find(s => s.id === strategyId);
+        const existingConfig = existing
+          ? (typeof existing.config === 'string' ? JSON.parse(existing.config || '{}') : (existing.config || {}))
+          : {};
         const ticker = document.getElementById('strategy-ticker')?.value;
+        const ticker2 = document.getElementById('strategy-ticker2')?.value;
+        const allocationPctRaw = parseFloat(document.getElementById('strategy-allocation-pct')?.value);
+        const fixedNotionalRaw = parseFloat(document.getElementById('strategy-fixed-notional')?.value);
+
+        const nextConfig = {
+          ...existingConfig,
+          ticker,
+          allocationPct: Number.isFinite(allocationPctRaw) && allocationPctRaw > 0 ? allocationPctRaw : 10
+        };
+        if (ticker2) {
+          nextConfig.ticker2 = ticker2;
+        }
+        if (Number.isFinite(fixedNotionalRaw) && fixedNotionalRaw > 0) {
+          nextConfig.fixedNotionalUsd = fixedNotionalRaw;
+        } else {
+          delete nextConfig.fixedNotionalUsd;
+        }
+
         await Utils.put('/strategies/' + strategyId, {
           name,
-          config: { ticker }
+          config: nextConfig
         });
       }
 

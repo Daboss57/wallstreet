@@ -30,6 +30,12 @@ function clampNumber(value, fallback, min, max) {
     return Math.max(min, Math.min(max, parsed));
 }
 
+function toPositiveNumber(value, fallback = 0) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    return parsed;
+}
+
 function normalizeRiskSettings(settings = {}) {
     return {
         max_position_pct: clampNumber(settings.max_position_pct, FUND_RISK_DEFAULTS.max_position_pct, 1, 100),
@@ -302,6 +308,42 @@ async function getFundRiskSnapshot(fundId) {
     };
 }
 
+async function resolveStrategyTradeSizing(strategy, config, price) {
+    const fixedNotional = toPositiveNumber(
+        config?.fixedNotionalUsd
+        ?? config?.notionalUsd
+        ?? config?.targetNotionalUsd
+        ?? config?.notional_usd
+        ?? 0,
+        0
+    );
+
+    let targetNotional = fixedNotional;
+    let allocationPct = null;
+
+    if (!targetNotional) {
+        const allocationInput = Number(config?.allocationPct ?? config?.allocation_pct);
+        allocationPct = Number.isFinite(allocationInput) && allocationInput > 0 ? allocationInput : 10;
+
+        const snapshot = await getFundRiskSnapshot(strategy.fund_id);
+        const fundEquity = toPositiveNumber(snapshot?.equity, 0);
+        targetNotional = fundEquity * (allocationPct / 100);
+    }
+
+    if (!Number.isFinite(targetNotional) || targetNotional <= 0) {
+        targetNotional = price;
+    }
+
+    const qty = Math.max(1, Math.floor(targetNotional / price));
+    const actualNotional = qty * price;
+    return {
+        qty,
+        targetNotional: +targetNotional.toFixed(2),
+        actualNotional: +actualNotional.toFixed(2),
+        allocationPct: allocationPct !== null ? +allocationPct.toFixed(4) : null,
+    };
+}
+
 function getOrCreateState(strategyId) {
     if (!strategyStates.has(strategyId)) {
         strategyStates.set(strategyId, {
@@ -384,8 +426,6 @@ async function executeStrategy(strategy) {
     // Normalize signal
     const signal = (result.signal || result.action || 'hold').toLowerCase();
     const ticker = result.ticker || config.ticker;
-    const qty = Math.round(Number(result.positionSize ?? result.quantity ?? 10));
-    if (!Number.isFinite(qty) || qty <= 0) return;
 
     // Record signal in activity log
     state.signals.unshift({
@@ -408,6 +448,9 @@ async function executeStrategy(strategy) {
     const price = signal === 'buy' ? Number(priceData.ask) : Number(priceData.bid);
     if (!Number.isFinite(price) || price <= 0) return;
     const side = signal;
+    const sizing = await resolveStrategyTradeSizing(strategy, config, price);
+    const qty = sizing.qty;
+    if (!Number.isFinite(qty) || qty <= 0) return;
     const now = Date.now();
     const tradeId = uuid();
 

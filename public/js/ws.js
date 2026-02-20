@@ -10,8 +10,12 @@ const WS = {
     reconnectTimer: null,
     reconnectDelay: 1000,
     maxReconnectDelay: 30000,
+    authErrorCount: 0,
+    maxAuthErrorsBeforeLogout: 3,
+    shouldReconnect: true,
 
     connect() {
+        this.shouldReconnect = true;
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const url = `${protocol}//${location.host}/ws`;
 
@@ -43,7 +47,9 @@ const WS = {
             console.log('[WS] Disconnected');
             this.connected = false;
             this.authenticated = false;
-            this.scheduleReconnect();
+            if (this.shouldReconnect) {
+                this.scheduleReconnect();
+            }
         };
 
         this.socket.onerror = (e) => {
@@ -64,14 +70,25 @@ const WS = {
 
             case 'authenticated':
                 this.authenticated = true;
+                this.authErrorCount = 0;
                 console.log('[WS] Authenticated as', msg.username);
                 Utils.emit('ws:authenticated', msg);
                 break;
 
             case 'auth_error':
                 console.error('[WS] Auth failed:', msg.message);
-                localStorage.removeItem('streetos_token');
-                Utils.emit('auth:logout');
+                this.authenticated = false;
+                this.authErrorCount += 1;
+                if (this.authErrorCount >= this.maxAuthErrorsBeforeLogout) {
+                    localStorage.removeItem('streetos_token');
+                    Utils.emit('auth:logout');
+                    Utils.showToast('error', 'Session Ended', 'Authentication failed repeatedly. Please log in again.');
+                    break;
+                }
+                Utils.showToast('error', 'Connection Issue', 'Realtime auth failed, reconnecting...');
+                if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+                    this.socket.close();
+                }
                 break;
 
             case 'ticks':
@@ -124,6 +141,7 @@ const WS = {
     },
 
     disconnect() {
+        this.shouldReconnect = false;
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;

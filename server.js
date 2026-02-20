@@ -24,21 +24,32 @@ const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 const DB_HEALTH_CHECK_INTERVAL_MS = Number.parseInt(process.env.DB_HEALTH_CHECK_INTERVAL_MS || '10000', 10);
 const PAUSE_BACKGROUND_ON_DB_DOWN = ['1', 'true', 'yes', 'on'].includes(String(process.env.PAUSE_BACKGROUND_ON_DB_DOWN || 'true').toLowerCase());
+const AUTH_RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.AUTH_RATE_LIMIT_WINDOW_MS || String(15 * 60 * 1000), 10);
+const AUTH_RATE_LIMIT_MAX = Number.parseInt(process.env.AUTH_RATE_LIMIT_MAX || '20', 10);
+const API_RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.API_RATE_LIMIT_WINDOW_MS || String(15 * 60 * 1000), 10);
+const API_RATE_LIMIT_MAX = Number.parseInt(process.env.API_RATE_LIMIT_MAX || '600', 10);
+const TRUST_PROXY_HOPS = Number.parseInt(
+    process.env.TRUST_PROXY_HOPS || (process.env.NODE_ENV === 'production' ? '1' : '0'),
+    10
+);
+
+app.set('trust proxy', Number.isFinite(TRUST_PROXY_HOPS) && TRUST_PROXY_HOPS > 0 ? TRUST_PROXY_HOPS : false);
 
 // Rate limiting configuration
 // Stricter limits for authentication endpoints (prevent brute force)
 const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 10, // 10 requests per window per IP
+    windowMs: AUTH_RATE_LIMIT_WINDOW_MS,
+    max: AUTH_RATE_LIMIT_MAX,
     message: { error: 'Too many authentication attempts, please try again later' },
+    skipSuccessfulRequests: true,
     standardHeaders: true,
     legacyHeaders: false,
 });
 
 // General API rate limiting
 const apiLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // 100 requests per window per IP
+    windowMs: API_RATE_LIMIT_WINDOW_MS,
+    max: API_RATE_LIMIT_MAX,
     message: { error: 'Too many requests, please try again later' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -141,8 +152,11 @@ app.get('/diag/db', (req, res) => {
 // Auth routes get stricter limiting
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
-// General API limiting (applied after auth-specific limiters)
-app.use('/api', apiLimiter);
+// General API limiting, excluding auth endpoints to avoid double-limiting logins.
+app.use('/api', (req, res, next) => {
+    if (req.path.startsWith('/auth/')) return next();
+    return apiLimiter(req, res, next);
+});
 
 app.use('/api', apiRouter);
 

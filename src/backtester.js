@@ -46,6 +46,12 @@ function clampNumber(value, fallback, min, max) {
     return Math.max(min, Math.min(max, parsed));
 }
 
+function toPositiveNumber(value, fallback = 0) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    return parsed;
+}
+
 function normalizeBacktestThresholds(input = {}) {
     return {
         min_trades: Math.floor(clampNumber(input.min_trades, BACKTEST_DEPLOY_THRESHOLDS.min_trades, 1, 500)),
@@ -333,7 +339,16 @@ async function runSingleTickerBacktest(strategyType, config, options = {}) {
     if (!ticker) throw new Error('Ticker missing in strategy config');
     const interval = config.interval || options.interval || '5m';
     const bars = clampNumber(options.bars, DEFAULT_BARS, MIN_BARS, MAX_BARS);
-    const qtyPerTrade = Math.max(1, Math.floor(Number(config.positionSize) || 10));
+    const allocationInput = Number(config.allocationPct ?? config.allocation_pct);
+    const allocationPct = Number.isFinite(allocationInput) && allocationInput > 0 ? allocationInput : 10;
+    const fixedNotional = toPositiveNumber(
+        config.fixedNotionalUsd
+        ?? config.notionalUsd
+        ?? config.targetNotionalUsd
+        ?? config.notional_usd
+        ?? 0,
+        0
+    );
     const signalFn = buildSingleSignalGenerator(strategyType, config);
     if (!signalFn) throw new Error(`Backtest unsupported for strategy type "${strategyType}"`);
 
@@ -354,6 +369,12 @@ async function runSingleTickerBacktest(strategyType, config, options = {}) {
         const { action } = signalFn(i, series);
         const price = series[i].close;
         if (action === 'buy' || action === 'sell') {
+            const unrealizedBefore = getUnrealizedPnl(position, price);
+            const equityBefore = initialCapital + realizedPnl + unrealizedBefore;
+            const targetNotional = fixedNotional > 0
+                ? fixedNotional
+                : Math.max(price, equityBefore * (allocationPct / 100));
+            const qtyPerTrade = Math.max(1, Math.floor(targetNotional / price));
             const applied = applyTrade(position, action, qtyPerTrade, price);
             position = applied.position;
             realizedPnl += applied.realizedDelta;
@@ -381,7 +402,9 @@ async function runSingleTickerBacktest(strategyType, config, options = {}) {
         interval,
         extra: {
             ticker,
-            positionSize: qtyPerTrade,
+            sizingMode: fixedNotional > 0 ? 'fixed_notional' : 'allocation_pct',
+            allocationPct: fixedNotional > 0 ? null : +allocationPct.toFixed(4),
+            fixedNotionalUsd: fixedNotional > 0 ? +fixedNotional.toFixed(2) : null,
             lastPrice: +series[series.length - 1].close.toFixed(4),
         },
     });
@@ -398,7 +421,16 @@ async function runPairsBacktest(config, options = {}) {
     const bars = clampNumber(options.bars, DEFAULT_BARS, MIN_BARS, MAX_BARS);
     const lookback = Math.max(5, Math.floor(Number(config.lookback) || 20));
     const threshold = Math.max(0.5, Number(config.stdDevThreshold) || 2);
-    const qtyPerLeg = Math.max(1, Math.floor(Number(config.positionSize) || 10));
+    const allocationInput = Number(config.allocationPct ?? config.allocation_pct);
+    const allocationPct = Number.isFinite(allocationInput) && allocationInput > 0 ? allocationInput : 10;
+    const fixedNotional = toPositiveNumber(
+        config.fixedNotionalUsd
+        ?? config.notionalUsd
+        ?? config.targetNotionalUsd
+        ?? config.notional_usd
+        ?? 0,
+        0
+    );
 
     const [seriesA, seriesB] = await Promise.all([
         getTickerSeries(tickerA, interval, bars),
@@ -454,10 +486,18 @@ async function runPairsBacktest(config, options = {}) {
 
         if (actionA !== 'hold' || actionB !== 'hold') {
             const before = realizedPnl;
-            const legA = applyTrade(posA, actionA, qtyPerLeg, row.closeA);
+            const unrealizedBefore = getUnrealizedPnl(posA, row.closeA) + getUnrealizedPnl(posB, row.closeB);
+            const equityBefore = initialCapital + realizedPnl + unrealizedBefore;
+            const targetNotional = fixedNotional > 0
+                ? fixedNotional
+                : Math.max(Math.min(row.closeA, row.closeB), equityBefore * (allocationPct / 100));
+            const qtyA = Math.max(1, Math.floor(targetNotional / row.closeA));
+            const qtyB = Math.max(1, Math.floor(targetNotional / row.closeB));
+
+            const legA = applyTrade(posA, actionA, qtyA, row.closeA);
             posA = legA.position;
             realizedPnl += legA.realizedDelta;
-            const legB = applyTrade(posB, actionB, qtyPerLeg, row.closeB);
+            const legB = applyTrade(posB, actionB, qtyB, row.closeB);
             posB = legB.position;
             realizedPnl += legB.realizedDelta;
             tradeCount += 1;
@@ -487,7 +527,9 @@ async function runPairsBacktest(config, options = {}) {
         extra: {
             tickerA,
             tickerB,
-            positionSize: qtyPerLeg,
+            sizingMode: fixedNotional > 0 ? 'fixed_notional' : 'allocation_pct',
+            allocationPct: fixedNotional > 0 ? null : +allocationPct.toFixed(4),
+            fixedNotionalUsd: fixedNotional > 0 ? +fixedNotional.toFixed(2) : null,
             lookback,
             stdDevThreshold: threshold,
             spreadLast: +(spreads[spreads.length - 1]).toFixed(6),

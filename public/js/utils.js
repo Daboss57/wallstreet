@@ -75,8 +75,28 @@ const Utils = {
         if (token) headers['Authorization'] = 'Bearer ' + token;
 
         const res = await fetch('/api' + path, { ...options, headers });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Request failed');
+        let data = {};
+        try {
+            data = await res.json();
+        } catch (_) {
+            data = {};
+        }
+
+        const isAuthEndpoint = path.startsWith('/auth/login') || path.startsWith('/auth/register');
+
+        if (!res.ok) {
+            if (res.status === 401 && !isAuthEndpoint) {
+                localStorage.removeItem('streetos_token');
+                this.emit('auth:logout');
+                throw new Error(data.error || 'Session expired. Please log in again.');
+            }
+            if (res.status === 429) {
+                const retryAfter = res.headers.get('retry-after');
+                const suffix = retryAfter ? ` Try again in ${retryAfter}s.` : '';
+                throw new Error((data.error || 'Too many requests, please try again later') + suffix);
+            }
+            throw new Error(data.error || 'Request failed');
+        }
         return data;
     },
 
