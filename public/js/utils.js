@@ -32,7 +32,7 @@ const Utils = {
 
     // Time ago
     timeAgo(timestamp) {
-        const seconds = Math.floor((Date.now() - timestamp) / 1000);
+        const seconds = Math.floor((Date.now() - Number(timestamp)) / 1000);
         if (seconds < 10) return 'just now';
         if (seconds < 60) return seconds + 's ago';
         const minutes = Math.floor(seconds / 60);
@@ -45,12 +45,12 @@ const Utils = {
 
     // Format time
     formatTime(timestamp) {
-        return new Date(timestamp).toLocaleTimeString('en-US', { hour12: false });
+        return new Date(Number(timestamp)).toLocaleTimeString('en-US', { hour12: false });
     },
 
     // Format date
     formatDate(timestamp) {
-        return new Date(timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        return new Date(Number(timestamp)).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     },
 
     // Color class based on value

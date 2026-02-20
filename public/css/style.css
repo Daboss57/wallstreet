@@ -2569,7 +2569,7 @@ select {
   margin-bottom: 16px;
 }
 
-.strategy-type-selector > label {
+.strategy-type-selector>label {
   display: block;
   font-size: 0.75rem;
   font-weight: 600;
@@ -2696,6 +2696,7 @@ select {
 }
 
 @media (max-width: 600px) {
+
   .overview-grid,
   .overview-stats {
     grid-template-columns: 1fr;
@@ -2710,5 +2711,388 @@ select {
     padding: 10px 14px;
     font-size: 0.8rem;
     white-space: nowrap;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   Bloomberg Dashboard — Fund Strategy Terminal
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.bloomberg-dashboard {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  min-height: 400px;
+}
+
+/* ─── Loading ─────────────────────────────────────────────────────── */
+.bb-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 60px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  letter-spacing: 2px;
+}
+
+.bb-loading-spinner {
+  width: 32px;
+  height: 32px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: bb-spin 0.8s linear infinite;
+}
+
+@keyframes bb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ─── Header Bar ──────────────────────────────────────────────────── */
+.bb-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  background: linear-gradient(90deg, #0d1117 0%, #131a26 100%);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 0.78rem;
+}
+
+.bb-header-left,
+.bb-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bb-brand {
+  color: #f97316;
+  font-weight: 700;
+  font-size: 0.9rem;
+  letter-spacing: 3px;
+}
+
+.bb-fund-name {
+  color: var(--text-primary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.bb-sep {
+  color: var(--text-muted);
+  margin: 0 2px;
+}
+
+.bb-live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: var(--green);
+  border-radius: 50%;
+  animation: bb-pulse 1.5s ease-in-out infinite;
+  box-shadow: 0 0 6px var(--green);
+}
+
+@keyframes bb-pulse {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* ─── Panel Layout ────────────────────────────────────────────────── */
+.bb-panel-row {
+  margin-bottom: 12px;
+}
+
+.bb-panel-row-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.bb-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px;
+  overflow: hidden;
+}
+
+.bb-panel-title {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 2px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bb-badge {
+  background: var(--accent-dim);
+  color: var(--accent);
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 0.65rem;
+  font-weight: 600;
+}
+
+/* ─── PnL Summary ─────────────────────────────────────────────────── */
+.bb-pnl-panel {
+  background: linear-gradient(135deg, #0d1117 0%, #111827 100%);
+}
+
+.bb-pnl-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 16px;
+}
+
+.bb-pnl-item {
+  text-align: center;
+}
+
+.bb-pnl-label {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.bb-pnl-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+/* ─── Colors ──────────────────────────────────────────────────────── */
+.bb-green {
+  color: var(--green) !important;
+}
+
+.bb-red {
+  color: var(--red) !important;
+}
+
+.bb-amber {
+  color: var(--yellow) !important;
+}
+
+.bb-dim {
+  color: var(--text-muted);
+}
+
+.bb-mono {
+  font-family: var(--font-mono);
+}
+
+/* ─── Tables ──────────────────────────────────────────────────────── */
+.bb-table-wrap {
+  overflow-x: auto;
+}
+
+.bb-scrollable {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.bb-scrollable::-webkit-scrollbar {
+  width: 4px;
+}
+
+.bb-scrollable::-webkit-scrollbar-thumb {
+  background: var(--border-hover);
+  border-radius: 2px;
+}
+
+.bb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+.bb-table th {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+  font-weight: 600;
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-secondary);
+}
+
+.bb-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(30, 41, 59, 0.5);
+  white-space: nowrap;
+}
+
+.bb-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+.bb-empty {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  padding: 24px;
+  text-align: center;
+  letter-spacing: 1px;
+}
+
+/* ─── Strategy Performance Cards ──────────────────────────────────── */
+.bb-strat-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.bb-strat-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+
+.bb-strat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.bb-strat-status {
+  font-size: 0.6rem;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.bb-strat-status.bb-active {
+  background: var(--green-dim);
+  color: var(--green);
+}
+
+.bb-strat-status.bb-inactive {
+  background: var(--red-dim);
+  color: var(--red);
+}
+
+.bb-strat-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  font-size: 0.75rem;
+}
+
+.bb-strat-metrics>div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bb-strat-time {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+/* ─── Activity Log / Signals ──────────────────────────────────────── */
+.bb-signal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bb-signal-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(30, 41, 59, 0.4);
+  font-size: 0.75rem;
+}
+
+.bb-signal-time {
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  min-width: 65px;
+}
+
+.bb-signal-badge {
+  font-weight: 700;
+  font-size: 0.65rem;
+  padding: 1px 6px;
+  border-radius: 3px;
+  letter-spacing: 1px;
+}
+
+.bb-signal-badge.bb-green {
+  background: var(--green-dim);
+}
+
+.bb-signal-badge.bb-red {
+  background: var(--red-dim);
+}
+
+.bb-signal-badge.bb-dim {
+  background: rgba(74, 85, 104, 0.2);
+}
+
+.bb-signal-strat {
+  color: var(--text-muted);
+  font-size: 0.65rem;
+}
+
+.bb-signal-reason {
+  width: 100%;
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  padding-left: 73px;
+  margin-top: -2px;
+}
+
+/* ─── Responsive ──────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .bb-panel-row-2col {
+    grid-template-columns: 1fr;
+  }
+
+  .bb-pnl-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .bb-strat-metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .bb-header {
+    flex-direction: column;
+    gap: 6px;
   }
 }

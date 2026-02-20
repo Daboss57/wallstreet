@@ -8,6 +8,7 @@ const engine = require('./src/engine');
 const news = require('./src/news');
 const wsServer = require('./src/wsServer');
 const matcher = require('./src/matcher');
+const strategyRunner = require('./src/strategyRunner');
 const {
     initDb,
     closeDb,
@@ -54,6 +55,7 @@ function pauseBackground(reason = 'db_unavailable') {
     engine.pause(reason);
     news.pause(reason);
     matcher.setPaused(true, reason);
+    strategyRunner.setPaused(true);
     console.warn('[Server] Background loops paused while DB is unavailable');
 }
 
@@ -64,6 +66,7 @@ function resumeBackground() {
     engine.resume();
     news.resume();
     matcher.setPaused(false);
+    strategyRunner.setPaused(false);
     console.log('[Server] Background loops resumed');
 }
 
@@ -163,6 +166,7 @@ async function bootstrap() {
         console.error('[Server] Engine startup failed:', error.message);
     }
     news.start();
+    strategyRunner.start();
 
     await monitorDbHealth();
 
@@ -202,6 +206,7 @@ async function shutdown() {
         console.error('[Server] Engine stop failed:', error.message);
     }
     news.stop();
+    strategyRunner.stop();
 
     try {
         await closeDb();

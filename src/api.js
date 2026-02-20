@@ -4,6 +4,7 @@ const { stmts, isDbUnavailableError } = require('./db');
 const { register, login, authenticate } = require('./auth');
 const engine = require('./engine');
 const orderbook = require('./orderbook');
+const strategyRunner = require('./strategyRunner');
 
 const router = express.Router();
 const MAX_ORDER_NOTIONAL_FRACTION = Math.max(0.05, Math.min(1, Number.parseFloat(process.env.MAX_ORDER_NOTIONAL_FRACTION || '0.35')));
@@ -717,6 +718,36 @@ router.get('/strategies/:id', authenticate, asyncRoute(async (req, res) => {
     }
 
     res.json(strategy);
+}));
+
+// Fund dashboard — live PnL, trades, positions, signals
+router.get('/funds/:fundId/dashboard', authenticate, asyncRoute(async (req, res) => {
+    const { fundId } = req.params;
+
+    const membership = await stmts.getFundMember.get(fundId, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    const strategies = await stmts.getStrategiesByFund.all(fundId);
+    const dashboard = strategyRunner.getDashboardData(fundId, strategies);
+    res.json(dashboard);
+}));
+
+// Strategy trades
+router.get('/strategies/:id/trades', authenticate, asyncRoute(async (req, res) => {
+    const strategy = await stmts.getStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    const trades = await stmts.getStrategyTrades.all(strategy.id, 100);
+    res.json(trades);
 }));
 
 // Update a strategy (fund members only)

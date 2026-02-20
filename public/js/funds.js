@@ -11,6 +11,8 @@ const Funds = {
   strategies: [],
   customStrategies: [],
   capitalTransactions: [],
+  dashboardData: null,
+  dashboardInterval: null,
 
   // Pre-built strategy types
   STRATEGY_TYPES: {
@@ -140,6 +142,7 @@ const Funds = {
           <button class="fund-tab ${this.currentTab === 'members' ? 'active' : ''}" data-tab="members">Members</button>
           <button class="fund-tab ${this.currentTab === 'capital' ? 'active' : ''}" data-tab="capital">Capital</button>
           <button class="fund-tab ${this.currentTab === 'strategies' ? 'active' : ''}" data-tab="strategies">Strategies</button>
+          <button class="fund-tab ${this.currentTab === 'dashboard' ? 'active' : ''}" data-tab="dashboard">📊 Dashboard</button>
         </div>
 
         <div class="fund-tab-content">
@@ -155,6 +158,7 @@ const Funds = {
       case 'members': return this.renderMembersTab();
       case 'capital': return this.renderCapitalTab();
       case 'strategies': return this.renderStrategiesTab();
+      case 'dashboard': return this.renderDashboardTab();
       default: return this.renderOverviewTab();
     }
   },
@@ -430,7 +434,17 @@ const Funds = {
   },
 
   switchTab(tab) {
+    // Clean up dashboard refresh if leaving dashboard
+    if (this.currentTab === 'dashboard' && tab !== 'dashboard') {
+      if (this.dashboardInterval) {
+        clearInterval(this.dashboardInterval);
+        this.dashboardInterval = null;
+      }
+    }
     this.currentTab = tab;
+    if (tab === 'dashboard') {
+      this.loadDashboard();
+    }
     this.updateContent();
   },
 
@@ -899,53 +913,11 @@ const Funds = {
             <div id="prebuilt-config">
               <div class="form-group">
                 <label>Target Ticker</label>
-                <select id="strategy-ticker">
-                  <optgroup label="Stocks — Large Cap">
-                    <option value="AAPL">AAPL — Apricot Corp</option>
-                    <option value="MSFT">MSFT — MegaSoft</option>
-                    <option value="NVDA">NVDA — NeuraVolt</option>
-                    <option value="AMZN">AMZN — AmazoNet</option>
-                    <option value="GOOG">GOOG — GooglTech</option>
-                    <option value="META">META — MetaVerse Inc</option>
-                    <option value="TSLA">TSLA — VoltMotors</option>
-                  </optgroup>
-                  <optgroup label="Stocks — Growth / Speculative">
-                    <option value="MOON">MOON — LunarTech</option>
-                    <option value="BIOT">BIOT — BioTera</option>
-                    <option value="QNTM">QNTM — QuantumLeap</option>
-                  </optgroup>
-                  <optgroup label="Commodities">
-                    <option value="OGLD">OGLD — OmniGold</option>
-                    <option value="SLVR">SLVR — SilverEdge</option>
-                    <option value="CRUD">CRUD — CrudeFlow</option>
-                    <option value="NATG">NATG — NatGas Plus</option>
-                    <option value="COPR">COPR — CopperLine</option>
-                  </optgroup>
-                  <optgroup label="Futures / Indices">
-                    <option value="SPXF">SPXF — S&P Futures</option>
-                    <option value="NQFT">NQFT — NQ Futures</option>
-                    <option value="DOWF">DOWF — Dow Futures</option>
-                    <option value="VIXF">VIXF — Fear Index</option>
-                  </optgroup>
-                  <optgroup label="ETFs">
-                    <option value="SAFE">SAFE — Treasury ETF</option>
-                    <option value="BNKX">BNKX — BankEx ETF</option>
-                    <option value="NRGY">NRGY — Energy ETF</option>
-                    <option value="MEDS">MEDS — HealthCare ETF</option>
-                    <option value="SEMX">SEMX — SemiConductor ETF</option>
-                    <option value="REIT">REIT — RealtyFund ETF</option>
-                  </optgroup>
-                  <optgroup label="Crypto">
-                    <option value="BTCX">BTCX — Bitcoin Index</option>
-                    <option value="ETHX">ETHX — Ethereum Index</option>
-                    <option value="SOLX">SOLX — Solana Index</option>
-                  </optgroup>
-                  <optgroup label="Forex">
-                    <option value="EURUSD">EURUSD — Euro/Dollar</option>
-                    <option value="GBPUSD">GBPUSD — Pound/Dollar</option>
-                    <option value="USDJPY">USDJPY — Dollar/Yen</option>
-                  </optgroup>
-                </select>
+                <select id="strategy-ticker">${this.tickerOptionsHtml()}</select>
+              </div>
+              <div class="form-group" id="pairs-ticker-group" style="display:none">
+                <label>Pair Ticker</label>
+                <select id="strategy-ticker2">${this.tickerOptionsHtml('MSFT')}</select>
               </div>
             </div>
 
@@ -985,8 +957,10 @@ const Funds = {
     document.getElementById('create-strategy-btn').style.display = '';
 
     const isCustom = type === 'custom';
+    const isPairs = type === 'pairs';
     document.getElementById('prebuilt-config').style.display = isCustom ? 'none' : '';
     document.getElementById('custom-code-section').style.display = isCustom ? '' : 'none';
+    document.getElementById('pairs-ticker-group').style.display = isPairs ? '' : 'none';
   },
 
   async createStrategy() {
@@ -1020,11 +994,21 @@ const Funds = {
         });
       } else {
         const ticker = document.getElementById('strategy-ticker')?.value;
+        const config = { ticker };
+
+        if (type === 'pairs') {
+          const ticker2 = document.getElementById('strategy-ticker2')?.value;
+          if (ticker === ticker2) {
+            Utils.showToast('error', 'Validation Error', 'Pair tickers must be different');
+            return;
+          }
+          config.ticker2 = ticker2;
+        }
 
         await Utils.post('/funds/' + fundId + '/strategies', {
           name,
           type,
-          config: { ticker }
+          config
         });
       }
 
@@ -1259,8 +1243,284 @@ const Funds = {
     }
   },
 
+  tickerOptionsHtml(selected = 'AAPL') {
+    const tickers = {
+      'Stocks — Large Cap': [
+        ['AAPL', 'Apricot Corp'], ['MSFT', 'MegaSoft'], ['NVDA', 'NeuraVolt'],
+        ['AMZN', 'AmazoNet'], ['GOOG', 'GooglTech'], ['META', 'MetaVerse Inc'], ['TSLA', 'VoltMotors']
+      ],
+      'Stocks — Growth / Speculative': [
+        ['MOON', 'LunarTech'], ['BIOT', 'BioTera'], ['QNTM', 'QuantumLeap']
+      ],
+      'Commodities': [
+        ['OGLD', 'OmniGold'], ['SLVR', 'SilverEdge'], ['CRUD', 'CrudeFlow'],
+        ['NATG', 'NatGas Plus'], ['COPR', 'CopperLine']
+      ],
+      'Futures / Indices': [
+        ['SPXF', 'S&P Futures'], ['NQFT', 'NQ Futures'], ['DOWF', 'Dow Futures'], ['VIXF', 'Fear Index']
+      ],
+      'ETFs': [
+        ['SAFE', 'Treasury ETF'], ['BNKX', 'BankEx ETF'], ['NRGY', 'Energy ETF'],
+        ['MEDS', 'HealthCare ETF'], ['SEMX', 'SemiConductor ETF'], ['REIT', 'RealtyFund ETF']
+      ],
+      'Crypto': [
+        ['BTCX', 'Bitcoin Index'], ['ETHX', 'Ethereum Index'], ['SOLX', 'Solana Index']
+      ],
+      'Forex': [
+        ['EURUSD', 'Euro/Dollar'], ['GBPUSD', 'Pound/Dollar'], ['USDJPY', 'Dollar/Yen']
+      ]
+    };
+    let html = '';
+    for (const [group, items] of Object.entries(tickers)) {
+      html += `<optgroup label="${group}">`;
+      for (const [sym, name] of items) {
+        html += `<option value="${sym}"${sym === selected ? ' selected' : ''}>${sym} — ${name}</option>`;
+      }
+      html += '</optgroup>';
+    }
+    return html;
+  },
+
+  // ─── Dashboard (Bloomberg Terminal) ────────────────────────────────────────
+  async loadDashboard() {
+    if (!this.currentFund) return;
+    try {
+      this.dashboardData = await Utils.get('/funds/' + this.currentFund.id + '/dashboard');
+    } catch (e) {
+      this.dashboardData = null;
+    }
+    // Only re-render the dashboard content area to avoid full page refresh
+    const el = document.getElementById('bloomberg-dashboard');
+    if (el) {
+      el.innerHTML = this.renderDashboardInner();
+    }
+    // Set up auto-refresh
+    if (!this.dashboardInterval) {
+      this.dashboardInterval = setInterval(() => this.loadDashboard(), 10000);
+    }
+  },
+
+  renderDashboardTab() {
+    return `
+      <div id="bloomberg-dashboard" class="bloomberg-dashboard">
+        ${this.dashboardData ? this.renderDashboardInner() : `
+          <div class="bb-loading">
+            <div class="bb-loading-spinner"></div>
+            <div>LOADING TERMINAL DATA...</div>
+          </div>
+        `}
+      </div>
+    `;
+  },
+
+  renderDashboardInner() {
+    const d = this.dashboardData;
+    if (!d) return '<div class="bb-loading">No data available</div>';
+
+    const s = d.summary;
+    const pnlClass = s.totalPnl >= 0 ? 'bb-green' : 'bb-red';
+    const realClass = s.realizedPnl >= 0 ? 'bb-green' : 'bb-red';
+    const unrealClass = s.unrealizedPnl >= 0 ? 'bb-green' : 'bb-red';
+
+    return `
+      <div class="bb-header">
+        <div class="bb-header-left">
+          <span class="bb-brand">STRATOS</span>
+          <span class="bb-sep">|</span>
+          <span class="bb-fund-name">${this.currentFund.name}</span>
+        </div>
+        <div class="bb-header-right">
+          <span class="bb-live-dot"></span> LIVE
+          <span class="bb-sep">|</span>
+          <span>${d.meta.isPaused ? '⏸ PAUSED' : '▶ RUNNING'}</span>
+          <span class="bb-sep">|</span>
+          <span>Every ${d.meta.runIntervalMs / 1000}s</span>
+          <span class="bb-sep">|</span>
+          <span>Runs: ${d.meta.totalRuns}</span>
+        </div>
+      </div>
+
+      <!-- PnL Summary -->
+      <div class="bb-panel-row">
+        <div class="bb-panel bb-pnl-panel">
+          <div class="bb-panel-title">P&L SUMMARY</div>
+          <div class="bb-pnl-grid">
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">TOTAL P&L</div>
+              <div class="bb-pnl-value ${pnlClass}">${this.bbMoney(s.totalPnl)}</div>
+            </div>
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">REALIZED</div>
+              <div class="bb-pnl-value ${realClass}">${this.bbMoney(s.realizedPnl)}</div>
+            </div>
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">UNREALIZED</div>
+              <div class="bb-pnl-value ${unrealClass}">${this.bbMoney(s.unrealizedPnl)}</div>
+            </div>
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">TRADES</div>
+              <div class="bb-pnl-value">${s.totalTrades}</div>
+            </div>
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">WIN RATE</div>
+              <div class="bb-pnl-value ${s.winRate >= 50 ? 'bb-green' : s.winRate > 0 ? 'bb-amber' : ''}">${s.winRate}%</div>
+            </div>
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">W / L</div>
+              <div class="bb-pnl-value"><span class="bb-green">${s.wins}</span> / <span class="bb-red">${s.losses}</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Positions + Trades Row -->
+      <div class="bb-panel-row bb-panel-row-2col">
+        <div class="bb-panel">
+          <div class="bb-panel-title">ACTIVE POSITIONS</div>
+          ${this.renderBBPositions(d.positions)}
+        </div>
+        <div class="bb-panel">
+          <div class="bb-panel-title">LIVE TRADES <span class="bb-badge">${d.trades.length}</span></div>
+          ${this.renderBBTrades(d.trades)}
+        </div>
+      </div>
+
+      <!-- Strategy Performance + Activity Log -->
+      <div class="bb-panel-row bb-panel-row-2col">
+        <div class="bb-panel">
+          <div class="bb-panel-title">STRATEGY PERFORMANCE</div>
+          ${this.renderBBStrategyPerf(d.strategies)}
+        </div>
+        <div class="bb-panel">
+          <div class="bb-panel-title">ACTIVITY LOG <span class="bb-badge">${d.signals.length}</span></div>
+          ${this.renderBBSignals(d.signals)}
+        </div>
+      </div>
+    `;
+  },
+
+  renderBBPositions(positions) {
+    if (!positions || positions.length === 0) {
+      return '<div class="bb-empty">No open positions</div>';
+    }
+    return `
+      <div class="bb-table-wrap">
+        <table class="bb-table">
+          <thead>
+            <tr><th>TICKER</th><th>SIDE</th><th>QTY</th><th>AVG ENTRY</th><th>CURRENT</th><th>UNREAL P&L</th><th>STRATEGY</th></tr>
+          </thead>
+          <tbody>
+            ${positions.map(p => {
+      const plClass = p.unrealizedPnl >= 0 ? 'bb-green' : 'bb-red';
+      return `<tr>
+                <td class="bb-mono">${p.ticker}</td>
+                <td class="${p.side === 'long' ? 'bb-green' : 'bb-red'}">${p.side.toUpperCase()}</td>
+                <td>${Math.abs(p.qty)}</td>
+                <td class="bb-mono">${p.avgEntry.toFixed(2)}</td>
+                <td class="bb-mono">${p.currentPrice.toFixed(2)}</td>
+                <td class="${plClass} bb-mono">${this.bbMoney(p.unrealizedPnl)}</td>
+                <td class="bb-dim">${p.strategyName}</td>
+              </tr>`;
+    }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderBBTrades(trades) {
+    if (!trades || trades.length === 0) {
+      return '<div class="bb-empty">No trades yet — strategies will execute every 30s</div>';
+    }
+    return `
+      <div class="bb-table-wrap bb-scrollable">
+        <table class="bb-table">
+          <thead>
+            <tr><th>TIME</th><th>TICKER</th><th>SIDE</th><th>QTY</th><th>PRICE</th><th>STRATEGY</th></tr>
+          </thead>
+          <tbody>
+            ${trades.slice(0, 20).map(t => {
+      return `<tr>
+                <td class="bb-dim">${Utils.formatTime(t.executed_at)}</td>
+                <td class="bb-mono">${t.ticker}</td>
+                <td class="${t.side === 'buy' ? 'bb-green' : 'bb-red'}">${t.side.toUpperCase()}</td>
+                <td>${t.quantity}</td>
+                <td class="bb-mono">${Number(t.price).toFixed(2)}</td>
+                <td class="bb-dim">${t.strategy_name || ''}</td>
+              </tr>`;
+    }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderBBStrategyPerf(strategies) {
+    if (!strategies || strategies.length === 0) {
+      return '<div class="bb-empty">No strategies configured</div>';
+    }
+    return `
+      <div class="bb-strat-grid">
+        ${strategies.map(s => {
+      const totalPnl = s.realizedPnl + s.unrealizedPnl;
+      const pnlClass = totalPnl >= 0 ? 'bb-green' : 'bb-red';
+      const winRate = (s.winCount + s.lossCount) > 0
+        ? ((s.winCount / (s.winCount + s.lossCount)) * 100).toFixed(0) : '—';
+      const typeIcon = this.STRATEGY_TYPES[s.type]?.icon || '📊';
+      return `
+            <div class="bb-strat-card">
+              <div class="bb-strat-header">
+                <span>${typeIcon} ${s.name}</span>
+                <span class="bb-strat-status ${s.is_active ? 'bb-active' : 'bb-inactive'}">${s.is_active ? 'ACTIVE' : 'OFF'}</span>
+              </div>
+              <div class="bb-strat-metrics">
+                <div><span class="bb-dim">P&L</span> <span class="${pnlClass}">${this.bbMoney(totalPnl)}</span></div>
+                <div><span class="bb-dim">Trades</span> <span>${s.tradeCount}</span></div>
+                <div><span class="bb-dim">Win%</span> <span>${winRate}%</span></div>
+                <div><span class="bb-dim">Signal</span> <span class="${s.lastSignal === 'buy' ? 'bb-green' : s.lastSignal === 'sell' ? 'bb-red' : 'bb-dim'}">${(s.lastSignal || '—').toUpperCase()}</span></div>
+              </div>
+              ${s.lastRunAt ? `<div class="bb-strat-time">Last run: ${Utils.timeAgo(s.lastRunAt)}</div>` : ''}
+            </div>
+          `;
+    }).join('')}
+      </div>
+    `;
+  },
+
+  renderBBSignals(signals) {
+    if (!signals || signals.length === 0) {
+      return '<div class="bb-empty">Waiting for strategy signals...</div>';
+    }
+    return `
+      <div class="bb-signal-list bb-scrollable">
+        ${signals.slice(0, 15).map(s => {
+      const sigClass = s.signal === 'buy' ? 'bb-green' : s.signal === 'sell' ? 'bb-red' : 'bb-dim';
+      return `
+            <div class="bb-signal-item">
+              <span class="bb-signal-time">${Utils.formatTime(s.timestamp)}</span>
+              <span class="bb-signal-badge ${sigClass}">${s.signal.toUpperCase()}</span>
+              <span class="bb-mono">${s.ticker}</span>
+              <span class="bb-signal-strat">${s.strategy_name}</span>
+              <div class="bb-signal-reason">${s.reason}</div>
+            </div>
+          `;
+    }).join('')}
+      </div>
+    `;
+  },
+
+  bbMoney(val) {
+    if (val === undefined || val === null) return '$0.00';
+    const sign = val >= 0 ? '+' : '';
+    return `${sign}$${Math.abs(val).toFixed(2)}`;
+  },
+
   destroy() {
     if (Terminal._clockInterval) clearInterval(Terminal._clockInterval);
+    if (this.dashboardInterval) {
+      clearInterval(this.dashboardInterval);
+      this.dashboardInterval = null;
+    }
   }
 };
 

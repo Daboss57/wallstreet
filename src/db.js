@@ -303,6 +303,7 @@ const SQL = {
     getStrategyById: 'SELECT * FROM strategies WHERE id = $1',
     getStrategiesByFund: 'SELECT * FROM strategies WHERE fund_id = $1 ORDER BY created_at DESC',
     getActiveStrategies: 'SELECT * FROM strategies WHERE is_active = true ORDER BY created_at DESC',
+    getActiveStrategiesAll: 'SELECT * FROM strategies WHERE is_active = true',
     updateStrategy: 'UPDATE strategies SET name = $1, type = $2, config = $3, is_active = $4, updated_at = $5 WHERE id = $6',
     deleteStrategy: 'DELETE FROM strategies WHERE id = $1',
 
@@ -432,6 +433,7 @@ const stmts = {
     getStrategyById: makeStatement('getStrategyById', SQL.getStrategyById),
     getStrategiesByFund: makeStatement('getStrategiesByFund', SQL.getStrategiesByFund),
     getActiveStrategies: makeStatement('getActiveStrategies', SQL.getActiveStrategies),
+    getActiveStrategiesAll: makeStatement('getActiveStrategiesAll', SQL.getActiveStrategiesAll),
     updateStrategy: makeStatement('updateStrategy', SQL.updateStrategy),
     deleteStrategy: makeStatement('deleteStrategy', SQL.deleteStrategy),
 
