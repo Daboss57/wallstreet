@@ -116,7 +116,7 @@ const Funds = {
   },
 
   // ─── Fund Details ────────────────────────────────────────────────────────────
-  async renderFundDetails() {
+  renderFundDetails() {
     const fund = this.currentFund;
     const isOwner = fund.role === 'owner';
     const isAnalyst = fund.role === 'analyst' || isOwner;
@@ -129,7 +129,10 @@ const Funds = {
             <h1>${fund.name}</h1>
             <span class="fund-role ${fund.role === 'owner' ? 'role-owner' : (fund.role === 'analyst' ? 'role-analyst' : 'role-client')}">${fund.role.toUpperCase()}</span>
           </div>
-          ${isOwner ? `<button class="btn-secondary" onclick="Funds.showEditFundModal()">Edit Fund</button>` : ''}
+          ${isOwner ? `
+            <button class="btn-secondary" onclick="Funds.showEditFundModal()">Edit Fund</button>
+            <button class="btn-danger" onclick="Funds.deleteFund()">Delete Fund</button>
+          ` : ''}
         </div>
 
         <div class="fund-tabs">
@@ -1201,6 +1204,22 @@ const Funds = {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#039;');
+  },
+
+  async deleteFund() {
+    if (!this.currentFund) return;
+    const fundName = this.currentFund.name;
+    if (!confirm(`Are you sure you want to permanently delete "${fundName}"? This cannot be undone.`)) return;
+
+    try {
+      await Utils.del('/funds/' + this.currentFund.id);
+      Utils.showToast('info', 'Fund Deleted', `"${fundName}" has been deleted`);
+      this.backToList();
+      await this.loadMyFunds();
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Delete Failed', e.message);
+    }
   },
 
   destroy() {

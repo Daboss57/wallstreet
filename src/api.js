@@ -987,4 +987,25 @@ router.post('/custom-strategies/:id/test', authenticate, asyncRoute(async (req, 
     }
 }));
 
+// ============================================================
+// ADMIN ENDPOINTS
+// ============================================================
+
+router.post('/admin/reset-portfolios', authenticate, asyncRoute(async (req, res) => {
+    // Check admin role from DB
+    const user = await stmts.getUserById.get(req.user.id);
+    if (!user || user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    // Reset all portfolio data
+    await stmts.resetAllPositions.run();
+    await stmts.resetAllTrades.run();
+    await stmts.resetAllOrders.run();
+    await stmts.resetAllSnapshots.run();
+    await stmts.resetAllUserCash.run();
+
+    res.json({ success: true, message: 'All portfolios have been reset' });
+}));
+
 module.exports = router;

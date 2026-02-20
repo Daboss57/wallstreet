@@ -311,6 +311,13 @@ const SQL = {
     getActiveCustomStrategies: 'SELECT * FROM custom_strategies WHERE is_active = true ORDER BY created_at DESC',
     updateCustomStrategy: 'UPDATE custom_strategies SET name = $1, code = $2, parameters = $3, is_active = $4, updated_at = $5 WHERE id = $6',
     deleteCustomStrategy: 'DELETE FROM custom_strategies WHERE id = $1',
+
+    // Admin reset
+    resetAllPositions: 'DELETE FROM positions',
+    resetAllTrades: 'DELETE FROM trades',
+    resetAllOrders: 'DELETE FROM orders',
+    resetAllSnapshots: 'DELETE FROM portfolio_snapshots',
+    resetAllUserCash: 'UPDATE users SET cash = starting_cash',
 };
 
 let dbInitialized = false;
@@ -430,6 +437,13 @@ const stmts = {
     getActiveCustomStrategies: makeStatement('getActiveCustomStrategies', SQL.getActiveCustomStrategies),
     updateCustomStrategy: makeStatement('updateCustomStrategy', SQL.updateCustomStrategy),
     deleteCustomStrategy: makeStatement('deleteCustomStrategy', SQL.deleteCustomStrategy),
+
+    // Admin reset
+    resetAllPositions: makeStatement('resetAllPositions', SQL.resetAllPositions),
+    resetAllTrades: makeStatement('resetAllTrades', SQL.resetAllTrades),
+    resetAllOrders: makeStatement('resetAllOrders', SQL.resetAllOrders),
+    resetAllSnapshots: makeStatement('resetAllSnapshots', SQL.resetAllSnapshots),
+    resetAllUserCash: makeStatement('resetAllUserCash', SQL.resetAllUserCash),
 };
 
 async function runInTransaction(operationName, transactionFn) {
@@ -455,7 +469,7 @@ async function runInTransaction(operationName, transactionFn) {
 
 async function batchUpsertCandles(candles) {
     if (!Array.isArray(candles) || candles.length === 0) return;
-    
+
     const sql = `
         INSERT INTO candles (ticker, "interval", open_time, open, high, low, close, volume)
         SELECT * FROM UNNEST(
@@ -474,7 +488,7 @@ async function batchUpsertCandles(candles) {
             close = EXCLUDED.close,
             volume = candles.volume + EXCLUDED.volume
     `;
-    
+
     await withDbRetry('batchUpsertCandles', async ({ pool }) => {
         await pool.query(sql, [
             candles.map(c => c.ticker),
