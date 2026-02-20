@@ -627,4 +627,182 @@ router.get('/funds/:id/capital/summary', authenticate, requireFundMember, asyncR
     res.json(summary);
 }));
 
+// ============================================================
+// STRATEGY ENDPOINTS
+// ============================================================
+
+// List strategies for a fund (fund members only)
+router.get('/funds/:fundId/strategies', authenticate, asyncRoute(async (req, res) => {
+    const { fundId } = req.params;
+    const membership = await stmts.getFundMember.get(fundId, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+    const strategies = await stmts.getStrategiesByFund.all(fundId);
+    res.json(strategies);
+}));
+
+// Create a new strategy (fund members only)
+router.post('/funds/:fundId/strategies', authenticate, asyncRoute(async (req, res) => {
+    const { fundId } = req.params;
+    const { name, type, config } = req.body;
+
+    const membership = await stmts.getFundMember.get(fundId, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    if (!name || !type) {
+        return res.status(400).json({ error: 'Missing required fields: name, type' });
+    }
+
+    const validTypes = ['mean_reversion', 'momentum', 'grid', 'pairs', 'custom'];
+    if (!validTypes.includes(type)) {
+        return res.status(400).json({ error: `Invalid type. Must be: ${validTypes.join(', ')}` });
+    }
+
+    const strategyId = uuid();
+    const now = Date.now();
+
+    await stmts.insertStrategy.run(
+        strategyId,
+        fundId,
+        name,
+        type,
+        JSON.stringify(config || {}),
+        true,
+        now,
+        now
+    );
+
+    const strategy = await stmts.getStrategyById.get(strategyId);
+    res.status(201).json({ success: true, strategy });
+}));
+
+// Get a single strategy by ID (fund members only)
+router.get('/strategies/:id', authenticate, asyncRoute(async (req, res) => {
+    const strategy = await stmts.getStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    res.json(strategy);
+}));
+
+// Update a strategy (fund members only)
+router.put('/strategies/:id', authenticate, asyncRoute(async (req, res) => {
+    const { name, type, config } = req.body;
+
+    const strategy = await stmts.getStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    if (type) {
+        const validTypes = ['mean_reversion', 'momentum', 'grid', 'pairs', 'custom'];
+        if (!validTypes.includes(type)) {
+            return res.status(400).json({ error: `Invalid type. Must be: ${validTypes.join(', ')}` });
+        }
+    }
+
+    const now = Date.now();
+    await stmts.updateStrategy.run(
+        name || strategy.name,
+        type || strategy.type,
+        JSON.stringify(config !== undefined ? config : strategy.config),
+        strategy.is_active,
+        now,
+        req.params.id
+    );
+
+    const updated = await stmts.getStrategyById.get(req.params.id);
+    res.json({ success: true, strategy: updated });
+}));
+
+// Delete a strategy (fund members only)
+router.delete('/strategies/:id', authenticate, asyncRoute(async (req, res) => {
+    const strategy = await stmts.getStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    await stmts.deleteStrategy.run(req.params.id);
+    res.json({ success: true });
+}));
+
+// Start a strategy (fund members only)
+router.post('/strategies/:id/start', authenticate, asyncRoute(async (req, res) => {
+    const strategy = await stmts.getStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    if (strategy.is_active) {
+        return res.status(400).json({ error: 'Strategy is already active' });
+    }
+
+    const now = Date.now();
+    await stmts.updateStrategy.run(
+        strategy.name,
+        strategy.type,
+        JSON.stringify(strategy.config),
+        true,
+        now,
+        req.params.id
+    );
+
+    const updated = await stmts.getStrategyById.get(req.params.id);
+    res.json({ success: true, strategy: updated });
+}));
+
+// Stop a strategy (fund members only)
+router.post('/strategies/:id/stop', authenticate, asyncRoute(async (req, res) => {
+    const strategy = await stmts.getStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    if (!strategy.is_active) {
+        return res.status(400).json({ error: 'Strategy is already stopped' });
+    }
+
+    const now = Date.now();
+    await stmts.updateStrategy.run(
+        strategy.name,
+        strategy.type,
+        JSON.stringify(strategy.config),
+        false,
+        now,
+        req.params.id
+    );
+
+    const updated = await stmts.getStrategyById.get(req.params.id);
+    res.json({ success: true, strategy: updated });
+}));
+
 module.exports = router;

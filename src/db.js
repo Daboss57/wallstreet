@@ -151,6 +151,17 @@ CREATE TABLE IF NOT EXISTS strategies (
   updated_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
 );
 
+CREATE TABLE IF NOT EXISTS custom_strategies (
+  id TEXT PRIMARY KEY,
+  fund_id TEXT NOT NULL REFERENCES funds(id),
+  name TEXT NOT NULL,
+  code TEXT NOT NULL,
+  parameters JSONB NOT NULL DEFAULT '{}',
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  created_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint),
+  updated_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
+);
+
 CREATE TABLE IF NOT EXISTS strategy_trades (
   id TEXT PRIMARY KEY,
   strategy_id TEXT NOT NULL REFERENCES strategies(id),
@@ -175,6 +186,8 @@ CREATE INDEX IF NOT EXISTS idx_fund_capital_fund ON fund_capital(fund_id);
 CREATE INDEX IF NOT EXISTS idx_fund_capital_user ON fund_capital(user_id, fund_id);
 CREATE INDEX IF NOT EXISTS idx_strategies_fund ON strategies(fund_id);
 CREATE INDEX IF NOT EXISTS idx_strategies_type ON strategies(type);
+CREATE INDEX IF NOT EXISTS idx_custom_strategies_fund ON custom_strategies(fund_id);
+CREATE INDEX IF NOT EXISTS idx_custom_strategies_active ON custom_strategies(is_active);
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_strategy ON strategy_trades(strategy_id);
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_ticker ON strategy_trades(ticker);
 `;
@@ -290,6 +303,14 @@ const SQL = {
     insertStrategyTrade: 'INSERT INTO strategy_trades (id, strategy_id, ticker, side, quantity, price, executed_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
     getStrategyTrades: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 ORDER BY executed_at DESC LIMIT $2',
     getStrategyTradesByTicker: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 AND ticker = $2 ORDER BY executed_at DESC',
+
+    // Custom Strategy CRUD
+    insertCustomStrategy: 'INSERT INTO custom_strategies (id, fund_id, name, code, parameters, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+    getCustomStrategyById: 'SELECT * FROM custom_strategies WHERE id = $1',
+    getCustomStrategiesByFund: 'SELECT * FROM custom_strategies WHERE fund_id = $1 ORDER BY created_at DESC',
+    getActiveCustomStrategies: 'SELECT * FROM custom_strategies WHERE is_active = true ORDER BY created_at DESC',
+    updateCustomStrategy: 'UPDATE custom_strategies SET name = $1, code = $2, parameters = $3, is_active = $4, updated_at = $5 WHERE id = $6',
+    deleteCustomStrategy: 'DELETE FROM custom_strategies WHERE id = $1',
 };
 
 let dbInitialized = false;
@@ -401,6 +422,14 @@ const stmts = {
     insertStrategyTrade: makeStatement('insertStrategyTrade', SQL.insertStrategyTrade),
     getStrategyTrades: makeStatement('getStrategyTrades', SQL.getStrategyTrades),
     getStrategyTradesByTicker: makeStatement('getStrategyTradesByTicker', SQL.getStrategyTradesByTicker),
+
+    // Custom Strategy CRUD
+    insertCustomStrategy: makeStatement('insertCustomStrategy', SQL.insertCustomStrategy),
+    getCustomStrategyById: makeStatement('getCustomStrategyById', SQL.getCustomStrategyById),
+    getCustomStrategiesByFund: makeStatement('getCustomStrategiesByFund', SQL.getCustomStrategiesByFund),
+    getActiveCustomStrategies: makeStatement('getActiveCustomStrategies', SQL.getActiveCustomStrategies),
+    updateCustomStrategy: makeStatement('updateCustomStrategy', SQL.updateCustomStrategy),
+    deleteCustomStrategy: makeStatement('deleteCustomStrategy', SQL.deleteCustomStrategy),
 };
 
 async function runInTransaction(operationName, transactionFn) {
