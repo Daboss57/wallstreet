@@ -13,8 +13,6 @@ const ChartManager = {
     _priceLines: [],       // active price line references
     _positionLines: null,  // { entry, tp, sl }
     _orderLines: [],       // pending order lines
-    _futureSeries: null,
-    _futurePreviewEnabled: false,
 
     init(container) {
         if (this.chart) this.chart.remove();
@@ -61,18 +59,6 @@ const ChartManager = {
             wickDownColor: '#ef4444',
         });
 
-        this._futureSeries = this.chart.addCandlestickSeries({
-            upColor: 'rgba(34, 197, 94, 0.24)',
-            downColor: 'rgba(239, 68, 68, 0.24)',
-            borderUpColor: 'rgba(34, 197, 94, 0.55)',
-            borderDownColor: 'rgba(239, 68, 68, 0.55)',
-            wickUpColor: 'rgba(34, 197, 94, 0.55)',
-            wickDownColor: 'rgba(239, 68, 68, 0.55)',
-            priceLineVisible: false,
-            lastValueVisible: false,
-            baseLineVisible: false,
-        });
-
         this.volumeSeries = this.chart.addHistogramSeries({
             color: '#3b82f6',
             priceFormat: { type: 'volume' },
@@ -105,7 +91,6 @@ const ChartManager = {
 
         // Clear old price lines
         this.clearAllPriceLines();
-        this.clearFuturePreview();
 
         try {
             const candles = await Utils.get(`/candles/${ticker}?interval=${this.currentInterval}&limit=500`);
@@ -133,9 +118,6 @@ const ChartManager = {
             this.candleSeries.setData(candleData);
             this.volumeSeries.setData(volumeData);
             this.chart.timeScale().fitContent();
-            if (this._futurePreviewEnabled) {
-                await this.refreshFuturePreview();
-            }
         } catch (e) {
             console.error('[Chart] Load error:', e);
         }
@@ -143,7 +125,6 @@ const ChartManager = {
 
     onTicks(ticks) {
         if (!this.currentTicker || !this.candleSeries) return;
-        let startedNewCandle = false;
 
         for (const tick of ticks) {
             if (tick.ticker !== this.currentTicker) continue;
@@ -154,7 +135,6 @@ const ChartManager = {
             // Update or create candle
             if (this.lastCandleTime && candleTime > this.lastCandleTime) {
                 // New candle
-                startedNewCandle = true;
                 this.lastCandleTime = candleTime;
                 this.candleSeries.update({
                     time: candleTime,
@@ -180,10 +160,6 @@ const ChartManager = {
                     close: tick.price,
                 });
             }
-        }
-
-        if (startedNewCandle && this._futurePreviewEnabled) {
-            this.refreshFuturePreview().catch((e) => console.error('[Chart] Future preview refresh error:', e));
         }
     },
 
@@ -345,46 +321,6 @@ const ChartManager = {
         } catch (_) { }
     },
 
-    async setFuturePreview(enabled) {
-        this._futurePreviewEnabled = !!enabled;
-        if (!this._futurePreviewEnabled) {
-            this.clearFuturePreview();
-            return { enabled: false, available: true };
-        }
-
-        await this.refreshFuturePreview();
-        return { enabled: true, available: true };
-    },
-
-    async refreshFuturePreview() {
-        if (!this._futurePreviewEnabled || !this.currentTicker) {
-            this.clearFuturePreview();
-            return;
-        }
-
-        const ticker = this.currentTicker;
-        const interval = this.currentInterval;
-        const response = await Utils.get(`/candles/${ticker}/preview?interval=${interval}&minutes=5`);
-
-        if (ticker !== this.currentTicker || interval !== this.currentInterval) return;
-        const candles = Array.isArray(response?.candles) ? response.candles : [];
-        const previewData = candles.map((c) => ({
-            time: Math.floor(Number(c.open_time) / 1000),
-            open: Number(c.open),
-            high: Number(c.high),
-            low: Number(c.low),
-            close: Number(c.close),
-        }));
-
-        if (this._futureSeries) this._futureSeries.setData(previewData);
-        this.chart?.timeScale().applyOptions({ rightOffset: this._futurePreviewEnabled ? 8 : 5 });
-    },
-
-    clearFuturePreview() {
-        if (this._futureSeries) this._futureSeries.setData([]);
-        this.chart?.timeScale().applyOptions({ rightOffset: 5 });
-    },
-
     changeInterval(interval) {
         if (interval === this.currentInterval) return;
         this.currentInterval = interval;
@@ -399,8 +335,6 @@ const ChartManager = {
     },
 
     destroy() {
-        this._futurePreviewEnabled = false;
-        this.clearFuturePreview();
         if (this._resizeObserver) this._resizeObserver.disconnect();
         if (this.chart) { this.chart.remove(); this.chart = null; }
         Utils.off('ticks', this.onTicks);

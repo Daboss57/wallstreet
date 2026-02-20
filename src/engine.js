@@ -108,12 +108,10 @@ const TICKER_LIST = Object.keys(TICKERS);
 const prices = {};          // ticker → { price, bid, ask, open, high, low, prevClose, volume, volatility }
 const orderFlowImpact = {}; // ticker → accumulated impact from user orders
 const candleBuffers = {};   // ticker → { '1m': currentCandle, '5m': ..., ... }
-const futureTickPlan = {};  // ticker → queued per-second states used by both live ticks and preview
 
 const INTERVALS = {
     '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1D': 86400
 };
-const FUTURE_PLAN_SECONDS = 300;
 
 let tickCount = 0;
 let newsCallback = null;  // set by wsServer to broadcast news
@@ -180,7 +178,6 @@ async function initPrices() {
             };
         }
         orderFlowImpact[ticker] = 0;
-        futureTickPlan[ticker] = [];
         initCandleBuffers(ticker, now);
     }
 }
@@ -204,107 +201,6 @@ function logDbWriteError(prefix, error) {
     console.error(`${prefix}:`, error.message);
 }
 
-function invalidateFutureTickPlan(ticker) {
-    if (!ticker) return;
-    futureTickPlan[ticker] = [];
-}
-
-function projectNextTickPoint(ticker, seedState, seedOrderFlow) {
-    const def = TICKERS[ticker];
-    if (!def) return null;
-
-    const oldPrice = Number(seedState.price);
-    const prevClose = Number(seedState.prevClose || oldPrice || def.basePrice);
-    const volRange = getVolatilityRange(def);
-    const priceBounds = getPriceBounds(def);
-
-    const returnVal = oldPrice > 0 ? Math.log(oldPrice / (prevClose || oldPrice)) : 0;
-    const omega = volRange.baseVolatility * volRange.baseVolatility * 0.03;
-    let nextVol = Math.sqrt(
-        omega + MARKET_GARCH_ALPHA * returnVal * returnVal + MARKET_GARCH_BETA * Number(seedState.volatility || volRange.baseVolatility) ** 2
-    );
-    nextVol = clamp(nextVol, volRange.minVolatility, volRange.maxVolatility);
-
-    const shock = gaussianRandom() * nextVol * MARKET_SHOCK_MULTIPLIER;
-    let nextPrice = oldPrice * Math.exp(def.drift + shock);
-
-    const deviation = (nextPrice - def.basePrice) / def.basePrice;
-    nextPrice -= deviation * def.meanRev * MARKET_MEAN_REVERSION_MULTIPLIER * oldPrice;
-
-    let nextOrderFlow = Number(seedOrderFlow || 0);
-    if (nextOrderFlow !== 0) {
-        const maxImpactAbs = oldPrice * MARKET_MAX_ORDER_FLOW_MOVE_PCT * getRiskMultiplier(def);
-        const appliedImpact = clamp(nextOrderFlow, -maxImpactAbs, maxImpactAbs);
-        nextPrice += appliedImpact;
-        nextOrderFlow *= MARKET_ORDER_FLOW_DECAY;
-        if (Math.abs(nextOrderFlow) < oldPrice * 0.00005) nextOrderFlow = 0;
-    }
-
-    const maxTickMove = oldPrice * getMaxTickMovePct(def);
-    nextPrice = clamp(nextPrice, oldPrice - maxTickMove, oldPrice + maxTickMove);
-    nextPrice = clamp(nextPrice, priceBounds.minPrice, priceBounds.maxPrice);
-
-    const decimals = getDecimals(ticker);
-    const spread = nextPrice * nextVol * 0.05 * MARKET_SPREAD_MULTIPLIER;
-    const tickVolume = Math.floor(Math.random() * 500 + 50) * (1 + nextVol * 4);
-
-    return {
-        price: +nextPrice.toFixed(decimals),
-        bid: +(nextPrice - spread / 2).toFixed(decimals),
-        ask: +(nextPrice + spread / 2).toFixed(decimals),
-        volatility: nextVol,
-        tickVolume,
-        prevClose,
-        orderFlowAfter: nextOrderFlow,
-    };
-}
-
-function ensureFutureTickPlan(ticker, minSeconds = FUTURE_PLAN_SECONDS) {
-    if (!TICKERS[ticker] || !prices[ticker]) return;
-    if (!futureTickPlan[ticker]) futureTickPlan[ticker] = [];
-
-    let seedState;
-    let seedOrderFlow;
-    const queue = futureTickPlan[ticker];
-    if (queue.length > 0) {
-        const tail = queue[queue.length - 1];
-        seedState = {
-            price: tail.price,
-            prevClose: tail.prevClose,
-            volatility: tail.volatility,
-        };
-        seedOrderFlow = tail.orderFlowAfter;
-    } else {
-        const state = prices[ticker];
-        seedState = {
-            price: state.price,
-            prevClose: state.prevClose,
-            volatility: state.volatility,
-        };
-        seedOrderFlow = orderFlowImpact[ticker] || 0;
-    }
-
-    while (queue.length < minSeconds) {
-        const point = projectNextTickPoint(ticker, seedState, seedOrderFlow);
-        if (!point) break;
-        queue.push(point);
-        seedState = {
-            price: point.price,
-            prevClose: point.prevClose,
-            volatility: point.volatility,
-        };
-        seedOrderFlow = point.orderFlowAfter;
-    }
-}
-
-function consumeFutureTickPoint(ticker) {
-    ensureFutureTickPlan(ticker, 1);
-    const queue = futureTickPlan[ticker] || [];
-    const point = queue.shift() || null;
-    ensureFutureTickPlan(ticker, FUTURE_PLAN_SECONDS);
-    return point;
-}
-
 async function tick() {
     if (paused) return [];
 
@@ -315,22 +211,58 @@ async function tick() {
     const priceStates = [];
 
     for (const ticker of TICKER_LIST) {
+        const def = TICKERS[ticker];
+        const volRange = getVolatilityRange(def);
+        const priceBounds = getPriceBounds(def);
         const state = prices[ticker];
-        const planned = consumeFutureTickPoint(ticker);
-        if (!planned) continue;
+        const oldPrice = state.price;
 
-        state.volatility = planned.volatility;
-        state.price = planned.price;
-        state.bid = planned.bid;
-        state.ask = planned.ask;
+        // ── GARCH volatility update ──
+        const returnVal = oldPrice > 0 ? Math.log(state.price / (state.prevClose || state.price)) : 0;
+        const omega = volRange.baseVolatility * volRange.baseVolatility * 0.03;
+        const alpha = MARKET_GARCH_ALPHA;
+        const beta = MARKET_GARCH_BETA;
+        state.volatility = Math.sqrt(
+            omega + alpha * returnVal * returnVal + beta * state.volatility * state.volatility
+        );
+        // Clamp volatility
+        const minVol = volRange.minVolatility;
+        const maxVol = volRange.maxVolatility;
+        state.volatility = Math.max(minVol, Math.min(maxVol, state.volatility));
+
+        // ── Random drift (GBM) ──
+        const drift = def.drift;
+        const shock = gaussianRandom() * state.volatility * MARKET_SHOCK_MULTIPLIER;
+        let newPrice = oldPrice * Math.exp(drift + shock);
+
+        // ── Mean reversion ──
+        const deviation = (newPrice - def.basePrice) / def.basePrice;
+        newPrice -= deviation * def.meanRev * MARKET_MEAN_REVERSION_MULTIPLIER * oldPrice;
+
+        // ── Order flow impact ──
+        if (orderFlowImpact[ticker] !== 0) {
+            const maxImpactAbs = oldPrice * MARKET_MAX_ORDER_FLOW_MOVE_PCT * getRiskMultiplier(def);
+            const appliedImpact = clamp(orderFlowImpact[ticker], -maxImpactAbs, maxImpactAbs);
+            newPrice += appliedImpact;
+            orderFlowImpact[ticker] *= MARKET_ORDER_FLOW_DECAY;
+            if (Math.abs(orderFlowImpact[ticker]) < oldPrice * 0.00005) orderFlowImpact[ticker] = 0;
+        }
+
+        // Hard movement/range guardrails to prevent crash-and-pump exploits.
+        const maxTickMove = oldPrice * getMaxTickMovePct(def);
+        newPrice = clamp(newPrice, oldPrice - maxTickMove, oldPrice + maxTickMove);
+        newPrice = clamp(newPrice, priceBounds.minPrice, priceBounds.maxPrice);
+
+        // ── Update spread ──
+        const spread = newPrice * state.volatility * 0.05 * MARKET_SPREAD_MULTIPLIER;
+        state.price = +newPrice.toFixed(getDecimals(ticker));
+        state.bid = +(newPrice - spread / 2).toFixed(getDecimals(ticker));
+        state.ask = +(newPrice + spread / 2).toFixed(getDecimals(ticker));
         state.high = Math.max(state.high, state.price);
         state.low = Math.min(state.low, state.price);
 
-        // Keep live order flow in sync with the deterministic queued path.
-        orderFlowImpact[ticker] = planned.orderFlowAfter;
-
         // ── Volume simulation ──
-        const tickVolume = planned.tickVolume;
+        const tickVolume = Math.floor(Math.random() * 500 + 50) * (1 + state.volatility * 4);
         state.volume += tickVolume;
 
         // ── Update candle buffers ──
@@ -442,7 +374,6 @@ function addOrderFlowImpact(ticker, side, notional) {
 
     const accumulatorCap = referencePrice * maxImpactPct * 2;
     orderFlowImpact[ticker] = clamp((orderFlowImpact[ticker] || 0) + signedImpact, -accumulatorCap, accumulatorCap);
-    invalidateFutureTickPlan(ticker);
 }
 
 function applyNewsShock(ticker, impactPct) {
@@ -455,7 +386,6 @@ function applyNewsShock(ticker, impactPct) {
     // Spike volatility
     const volRange = getVolatilityRange(def);
     state.volatility = Math.min(state.volatility * MARKET_NEWS_VOL_SPIKE_MULTIPLIER, volRange.maxVolatility);
-    invalidateFutureTickPlan(ticker);
 }
 
 function getPrice(ticker) {
@@ -476,70 +406,6 @@ function getAllTickerDefs() {
 
 function getCurrentCandle(ticker, interval) {
     return candleBuffers[ticker]?.[interval] || null;
-}
-
-function previewCandles(ticker, interval = '1m', minutesAhead = 5) {
-    const intervalSecs = INTERVALS[interval];
-    const current = candleBuffers[ticker]?.[interval];
-    if (!TICKERS[ticker] || !prices[ticker] || !intervalSecs || !current) return [];
-
-    const cappedMinutes = Math.max(1, Math.min(5, Number(minutesAhead) || 5));
-    const maxCandles = Math.max(1, Math.ceil((cappedMinutes * 60) / intervalSecs));
-    const horizonSeconds = Math.max(intervalSecs, cappedMinutes * 60);
-    const intervalMs = intervalSecs * 1000;
-    const now = Math.floor(Date.now() / 1000) * 1000;
-    const decimals = getDecimals(ticker);
-    ensureFutureTickPlan(ticker, horizonSeconds);
-    const queued = (futureTickPlan[ticker] || []).slice(0, horizonSeconds);
-
-    let simCandle = {
-        openTime: current.openTime,
-        open: Number(current.open),
-        high: Number(current.high),
-        low: Number(current.low),
-        close: Number(current.close),
-        volume: Number(current.volume || 0),
-    };
-    const baseOpenTime = current.openTime;
-    const projected = [];
-
-    for (let i = 0; i < queued.length; i++) {
-        const point = queued[i];
-        const simPrice = Number(point.price);
-        const tickVolume = Number(point.tickVolume || 0);
-        const simulatedNow = now + (i + 1) * 1000;
-        const expectedOpen = Math.floor(simulatedNow / intervalMs) * intervalMs;
-
-        if (expectedOpen > simCandle.openTime) {
-            if (simCandle.openTime > baseOpenTime) projected.push({ ...simCandle });
-            simCandle = {
-                openTime: expectedOpen,
-                open: simPrice,
-                high: simPrice,
-                low: simPrice,
-                close: simPrice,
-                volume: tickVolume,
-            };
-        } else {
-            simCandle.high = Math.max(simCandle.high, simPrice);
-            simCandle.low = Math.min(simCandle.low, simPrice);
-            simCandle.close = simPrice;
-            simCandle.volume += tickVolume;
-        }
-    }
-
-    if (simCandle.openTime > baseOpenTime) projected.push({ ...simCandle });
-
-    return projected.slice(0, maxCandles).map((c) => ({
-        ticker,
-        interval,
-        open_time: c.openTime,
-        open: +Number(c.open).toFixed(decimals),
-        high: +Number(c.high).toFixed(decimals),
-        low: +Number(c.low).toFixed(decimals),
-        close: +Number(c.close).toFixed(decimals),
-        volume: +Number(c.volume || 0).toFixed(0),
-    }));
 }
 
 function setTickCallback(cb) { tickCallback = cb; }
@@ -611,7 +477,6 @@ module.exports = {
     start, stop, tick,
     pause, resume, isPaused,
     getPrice, getAllPrices, getTickerDef, getAllTickerDefs,
-    previewCandles,
     getCurrentCandle, addOrderFlowImpact, applyNewsShock,
     setTickCallback, setNewsCallback, getNewsCallback,
     getDecimals

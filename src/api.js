@@ -9,12 +9,6 @@ const backtester = require('./backtester');
 
 const router = express.Router();
 const MIN_ORDER_NOTIONAL = Math.max(1, Number.parseFloat(process.env.MIN_ORDER_NOTIONAL || '50'));
-const FUTURE_PREVIEW_ALLOWED_USERS = new Set(
-    String(process.env.FUTURE_PREVIEW_ALLOWED_USERS || 'noel')
-        .split(',')
-        .map((name) => name.trim().toLowerCase())
-        .filter(Boolean)
-);
 
 function handleRouteError(res, error, defaultStatus = 500) {
     if (isDbUnavailableError(error)) {
@@ -105,34 +99,6 @@ router.get('/candles/:ticker', asyncRoute(async (req, res) => {
     }
 
     res.json(candles);
-}));
-
-router.get('/candles/:ticker/preview', authenticate, asyncRoute(async (req, res) => {
-    const ticker = String(req.params.ticker || '').toUpperCase();
-    const interval = String(req.query.interval || '1m');
-    const minutes = Math.max(1, Math.min(5, Number.parseInt(req.query.minutes, 10) || 5));
-
-    if (!engine.getTickerDef(ticker)) {
-        return res.status(400).json({ error: 'Invalid ticker' });
-    }
-    if (!engine.INTERVALS[interval]) {
-        return res.status(400).json({ error: 'Invalid interval' });
-    }
-
-    const user = await stmts.getUserById.get(req.user.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    if (!canUseFuturePreview(user)) {
-        return res.status(403).json({ error: 'Future preview is not enabled for this account' });
-    }
-
-    const candles = engine.previewCandles(ticker, interval, minutes);
-    return res.json({
-        ticker,
-        interval,
-        minutes,
-        candles,
-        mode: 'queued_live_path',
-    });
 }));
 
 router.get('/orderbook/:ticker', asyncRoute(async (req, res) => {
@@ -444,13 +410,6 @@ function requireFundOwner(req, res, next) {
         req.membership = membership;
         next();
     })().catch(next);
-}
-
-function canUseFuturePreview(user) {
-    if (!user) return false;
-    const role = String(user.role || '').toLowerCase();
-    if (role === 'admin') return true;
-    return FUTURE_PREVIEW_ALLOWED_USERS.has(String(user.username || '').toLowerCase());
 }
 
 function clampNumber(value, fallback, min, max) {
