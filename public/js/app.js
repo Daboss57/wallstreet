@@ -71,6 +71,10 @@ const App = {
                 this.currentPage = News;
                 News.render(container);
                 break;
+            case '#/funds':
+                this.currentPage = Funds;
+                Funds.render(container);
+                break;
             default:
                 window.location.hash = '#/';
         }

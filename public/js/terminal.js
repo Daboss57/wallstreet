@@ -74,6 +74,7 @@ const Terminal = {
             <a href="#/terminal" class="active">Terminal</a>
             <a href="#/markets">Markets</a>
             <a href="#/portfolio">Portfolio</a>
+            <a href="#/funds">Funds</a>
             <a href="#/leaderboard">Leaderboard</a>
             <a href="#/news">News</a>
           </nav>
