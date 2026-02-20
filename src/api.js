@@ -805,4 +805,185 @@ router.post('/strategies/:id/stop', authenticate, asyncRoute(async (req, res) =>
     res.json({ success: true, strategy: updated });
 }));
 
+// ============================================================
+// CUSTOM STRATEGY ENDPOINTS
+// ============================================================
+
+// Validate that code looks like a function
+function validateStrategyCode(code) {
+    if (typeof code !== 'string' || code.trim().length === 0) {
+        return { valid: false, error: 'Code must be a non-empty string' };
+    }
+    // Simple check: must contain function keyword or arrow syntax
+    if (!code.includes('function') && !code.includes('=>')) {
+        return { valid: false, error: 'Code must be a function (use "function" or arrow syntax)' };
+    }
+    return { valid: true };
+}
+
+// Create a custom strategy (fund owner only)
+router.post('/custom-strategies', authenticate, asyncRoute(async (req, res) => {
+    const { fund_id, name, code, parameters } = req.body;
+
+    if (!fund_id || !name || !code) {
+        return res.status(400).json({ error: 'Missing required fields: fund_id, name, code' });
+    }
+
+    // Verify fund ownership
+    const membership = await stmts.getFundMember.get(fund_id, req.user.id);
+    if (!membership || membership.role !== 'owner') {
+        return res.status(403).json({ error: 'Owner access required for this fund' });
+    }
+
+    // Validate code
+    const validation = validateStrategyCode(code);
+    if (!validation.valid) {
+        return res.status(400).json({ error: validation.error });
+    }
+
+    const strategyId = uuid();
+    const now = Date.now();
+
+    await stmts.insertCustomStrategy.run(
+        strategyId,
+        fund_id,
+        name,
+        code,
+        JSON.stringify(parameters || {}),
+        true,
+        now,
+        now
+    );
+
+    const strategy = await stmts.getCustomStrategyById.get(strategyId);
+    res.status(201).json({ success: true, strategy });
+}));
+
+// Get a custom strategy by ID (fund members only)
+router.get('/custom-strategies/:id', authenticate, asyncRoute(async (req, res) => {
+    const strategy = await stmts.getCustomStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Custom strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    res.json(strategy);
+}));
+
+// List custom strategies for a fund (fund members only)
+router.get('/funds/:fundId/custom-strategies', authenticate, asyncRoute(async (req, res) => {
+    const { fundId } = req.params;
+
+    const membership = await stmts.getFundMember.get(fundId, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    const strategies = await stmts.getCustomStrategiesByFund.all(fundId);
+    res.json(strategies);
+}));
+
+// Update a custom strategy (fund owner only)
+router.put('/custom-strategies/:id', authenticate, asyncRoute(async (req, res) => {
+    const { name, code, parameters, is_active } = req.body;
+
+    const strategy = await stmts.getCustomStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Custom strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership || membership.role !== 'owner') {
+        return res.status(403).json({ error: 'Owner access required for this fund' });
+    }
+
+    // Validate code if provided
+    if (code !== undefined) {
+        const validation = validateStrategyCode(code);
+        if (!validation.valid) {
+            return res.status(400).json({ error: validation.error });
+        }
+    }
+
+    const now = Date.now();
+    await stmts.updateCustomStrategy.run(
+        name || strategy.name,
+        code !== undefined ? code : strategy.code,
+        JSON.stringify(parameters !== undefined ? parameters : strategy.parameters),
+        is_active !== undefined ? is_active : strategy.is_active,
+        now,
+        req.params.id
+    );
+
+    const updated = await stmts.getCustomStrategyById.get(req.params.id);
+    res.json({ success: true, strategy: updated });
+}));
+
+// Delete a custom strategy (fund owner only)
+router.delete('/custom-strategies/:id', authenticate, asyncRoute(async (req, res) => {
+    const strategy = await stmts.getCustomStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Custom strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership || membership.role !== 'owner') {
+        return res.status(403).json({ error: 'Owner access required for this fund' });
+    }
+
+    await stmts.deleteCustomStrategy.run(req.params.id);
+    res.json({ success: true });
+}));
+
+// Test run a custom strategy (fund members only, no trades executed)
+router.post('/custom-strategies/:id/test', authenticate, asyncRoute(async (req, res) => {
+    const strategy = await stmts.getCustomStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Custom strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    const { test_data } = req.body;
+
+    try {
+        // Create a sandboxed execution context
+        const sandboxContext = {
+            prices: engine.getAllPrices(),
+            candles: {},
+            ticker: (symbol) => engine.getPrice(symbol?.toUpperCase()),
+            log: (...args) => console.log('[Strategy Test]', ...args),
+        };
+
+        // Build and execute the strategy function
+        // Note: This is a simple test runner. In production, you'd want a proper sandbox.
+        const fn = new Function('context', `
+            const { prices, candles, ticker, log } = context;
+            ${strategy.code}
+            return typeof run === 'function' ? run(context) : (typeof strategy === 'function' ? strategy(context) : null);
+        `);
+
+        const testResult = fn(sandboxContext);
+
+        res.json({
+            success: true,
+            result: testResult,
+            message: 'Strategy executed in test mode (no trades placed)',
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message,
+            message: 'Strategy execution failed',
+        });
+    }
+}));
+
 module.exports = router;
