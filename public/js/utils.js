@@ -82,6 +82,7 @@ const Utils = {
 
     async get(path) { return this.api(path); },
     async post(path, body) { return this.api(path, { method: 'POST', body: JSON.stringify(body) }); },
+    async put(path, body) { return this.api(path, { method: 'PUT', body: JSON.stringify(body) }); },
     async del(path) { return this.api(path, { method: 'DELETE' }); },
 
     // Toast notifications

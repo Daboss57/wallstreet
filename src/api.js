@@ -461,17 +461,18 @@ router.get('/funds', asyncRoute(async (req, res) => {
     res.json(funds);
 }));
 
+// Get funds user owns or is member of (auth required)
+// NOTE: Must be before /funds/:id so Express doesn't match "my" as an :id
+router.get('/funds/my', authenticate, asyncRoute(async (req, res) => {
+    const funds = await stmts.getUserFunds.all(req.user.id);
+    res.json(funds);
+}));
+
 // Get fund details (public)
 router.get('/funds/:id', asyncRoute(async (req, res) => {
     const fund = await stmts.getFundById.get(req.params.id);
     if (!fund) return res.status(404).json({ error: 'Fund not found' });
     res.json(fund);
-}));
-
-// Get funds user owns or is member of (auth required)
-router.get('/funds/my', authenticate, asyncRoute(async (req, res) => {
-    const funds = await stmts.getUserFunds.all(req.user.id);
-    res.json(funds);
 }));
 
 // Update fund (owner only)

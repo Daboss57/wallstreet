@@ -4,28 +4,28 @@
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 const Funds = {
-    myFunds: [],
-    currentFund: null,
-    currentTab: 'overview',
-    members: [],
-    strategies: [],
-    customStrategies: [],
-    capitalTransactions: [],
+  myFunds: [],
+  currentFund: null,
+  currentTab: 'overview',
+  members: [],
+  strategies: [],
+  customStrategies: [],
+  capitalTransactions: [],
 
-    // Pre-built strategy types
-    STRATEGY_TYPES: {
-        'mean_reversion': { name: 'Mean Reversion', icon: '🔄', desc: 'Buy oversold, sell overbought assets' },
-        'momentum': { name: 'Momentum', icon: '🚀', desc: 'Follow market trends and momentum' },
-        'grid': { name: 'Grid Trading', icon: '📊', desc: 'Place buy/sell orders at fixed intervals' },
-        'pairs': { name: 'Pairs Trading', icon: '🔗', desc: 'Trade correlated asset pairs' },
-        'custom': { name: 'Custom Strategy', icon: '⚙️', desc: 'Write your own trading logic' }
-    },
+  // Pre-built strategy types
+  STRATEGY_TYPES: {
+    'mean_reversion': { name: 'Mean Reversion', icon: '🔄', desc: 'Buy oversold, sell overbought assets' },
+    'momentum': { name: 'Momentum', icon: '🚀', desc: 'Follow market trends and momentum' },
+    'grid': { name: 'Grid Trading', icon: '📊', desc: 'Place buy/sell orders at fixed intervals' },
+    'pairs': { name: 'Pairs Trading', icon: '🔗', desc: 'Trade correlated asset pairs' },
+    'custom': { name: 'Custom Strategy', icon: '⚙️', desc: 'Write your own trading logic' }
+  },
 
-    // ─── Main Render ────────────────────────────────────────────────────────────
-    async render(container) {
-        await this.loadMyFunds();
+  // ─── Main Render ────────────────────────────────────────────────────────────
+  async render(container) {
+    await this.loadMyFunds();
 
-        container.innerHTML = `
+    container.innerHTML = `
       <div class="terminal-layout">
         ${Terminal.renderHeader()}
         <div class="funds-page">
@@ -34,40 +34,42 @@ const Funds = {
       </div>
     `;
 
-        Terminal.startClock();
-        this.bindEvents();
-    },
+    Terminal.startClock();
+    this.bindEvents();
+  },
 
-    renderContent() {
-        // If viewing a specific fund
-        if (this.currentFund) {
-            return this.renderFundDetails();
-        }
+  renderContent() {
+    // If viewing a specific fund
+    if (this.currentFund) {
+      return this.renderFundDetails();
+    }
 
-        // Otherwise show funds list
-        return this.renderFundsList();
-    },
+    // Otherwise show funds list
+    return this.renderFundsList();
+  },
 
-    // ─── Funds List ──────────────────────────────────────────────────────────────
-    renderFundsList() {
-        return `
+  // ─── Funds List ──────────────────────────────────────────────────────────────
+  renderFundsList() {
+    return `
       <div class="funds-header">
         <h1>🏦 Hedge Funds</h1>
         <p class="page-subtitle">Create and manage collaborative trading funds</p>
       </div>
 
+      ${this.myFunds.length > 0 ? `
       <div class="funds-actions">
         <button class="btn-primary" onclick="Funds.showCreateFundModal()">
           + Create New Fund
         </button>
       </div>
+      ` : ''}
 
       ${this.myFunds.length === 0 ? this.renderEmptyState() : this.renderFundsGrid()}
     `;
-    },
+  },
 
-    renderEmptyState() {
-        return `
+  renderEmptyState() {
+    return `
       <div class="funds-empty-state">
         <div class="empty-icon">🏦</div>
         <h3>No Funds Yet</h3>
@@ -75,21 +77,21 @@ const Funds = {
         <button class="btn-primary" onclick="Funds.showCreateFundModal()">Create Your First Fund</button>
       </div>
     `;
-    },
+  },
 
-    renderFundsGrid() {
-        return `
+  renderFundsGrid() {
+    return `
       <div class="funds-grid">
         ${this.myFunds.map(fund => this.renderFundCard(fund)).join('')}
       </div>
     `;
-    },
+  },
 
-    renderFundCard(fund) {
-        const roleClass = fund.role === 'owner' ? 'role-owner' : (fund.role === 'analyst' ? 'role-analyst' : 'role-client');
-        const roleLabel = fund.role.charAt(0).toUpperCase() + fund.role.slice(1);
+  renderFundCard(fund) {
+    const roleClass = fund.role === 'owner' ? 'role-owner' : (fund.role === 'analyst' ? 'role-analyst' : 'role-client');
+    const roleLabel = fund.role.charAt(0).toUpperCase() + fund.role.slice(1);
 
-        return `
+    return `
       <div class="fund-card" onclick="Funds.viewFund('${fund.id}')">
         <div class="fund-card-header">
           <span class="fund-name">${fund.name}</span>
@@ -111,15 +113,15 @@ const Funds = {
         </div>
       </div>
     `;
-    },
+  },
 
-    // ─── Fund Details ────────────────────────────────────────────────────────────
-    async renderFundDetails() {
-        const fund = this.currentFund;
-        const isOwner = fund.role === 'owner';
-        const isAnalyst = fund.role === 'analyst' || isOwner;
+  // ─── Fund Details ────────────────────────────────────────────────────────────
+  async renderFundDetails() {
+    const fund = this.currentFund;
+    const isOwner = fund.role === 'owner';
+    const isAnalyst = fund.role === 'analyst' || isOwner;
 
-        return `
+    return `
       <div class="fund-details">
         <div class="fund-details-header">
           <button class="back-btn" onclick="Funds.backToList()">← Back to Funds</button>
@@ -142,23 +144,23 @@ const Funds = {
         </div>
       </div>
     `;
-    },
+  },
 
-    renderTabContent() {
-        switch (this.currentTab) {
-            case 'overview': return this.renderOverviewTab();
-            case 'members': return this.renderMembersTab();
-            case 'capital': return this.renderCapitalTab();
-            case 'strategies': return this.renderStrategiesTab();
-            default: return this.renderOverviewTab();
-        }
-    },
+  renderTabContent() {
+    switch (this.currentTab) {
+      case 'overview': return this.renderOverviewTab();
+      case 'members': return this.renderMembersTab();
+      case 'capital': return this.renderCapitalTab();
+      case 'strategies': return this.renderStrategiesTab();
+      default: return this.renderOverviewTab();
+    }
+  },
 
-    // ─── Overview Tab ────────────────────────────────────────────────────────────
-    renderOverviewTab() {
-        const fund = this.currentFund;
+  // ─── Overview Tab ────────────────────────────────────────────────────────────
+  renderOverviewTab() {
+    const fund = this.currentFund;
 
-        return `
+    return `
       <div class="overview-grid">
         <div class="overview-card">
           <div class="card-label">Strategy Type</div>
@@ -199,13 +201,13 @@ const Funds = {
         </div>
       </div>
     `;
-    },
+  },
 
-    // ─── Members Tab ─────────────────────────────────────────────────────────────
-    renderMembersTab() {
-        const isOwner = this.currentFund.role === 'owner';
+  // ─── Members Tab ─────────────────────────────────────────────────────────────
+  renderMembersTab() {
+    const isOwner = this.currentFund.role === 'owner';
 
-        return `
+    return `
       <div class="members-section">
         ${isOwner ? `
         <div class="section-actions">
@@ -235,12 +237,12 @@ const Funds = {
         `}
       </div>
     `;
-    },
+  },
 
-    renderMemberRow(member, isOwner) {
-        const roleClass = member.role === 'owner' ? 'role-owner' : (member.role === 'analyst' ? 'role-analyst' : 'role-client');
+  renderMemberRow(member, isOwner) {
+    const roleClass = member.role === 'owner' ? 'role-owner' : (member.role === 'analyst' ? 'role-analyst' : 'role-client');
 
-        return `
+    return `
       <tr>
         <td style="font-weight:600">${member.username}</td>
         <td><span class="fund-role ${roleClass}">${member.role}</span></td>
@@ -255,11 +257,11 @@ const Funds = {
         ` : ''}
       </tr>
     `;
-    },
+  },
 
-    // ─── Capital Tab ─────────────────────────────────────────────────────────────
-    renderCapitalTab() {
-        return `
+  // ─── Capital Tab ─────────────────────────────────────────────────────────────
+  renderCapitalTab() {
+    return `
       <div class="capital-section">
         <div class="capital-actions">
           <button class="btn-primary" onclick="Funds.showDepositModal()">+ Deposit</button>
@@ -303,24 +305,24 @@ const Funds = {
         `}
       </div>
     `;
-    },
+  },
 
-    getUserCapital() {
-        // Calculate user's net capital in the fund
-        const userTxns = this.capitalTransactions.filter(t => t.user_id === App.user.id);
-        let total = 0;
-        for (const t of userTxns) {
-            total += t.type === 'deposit' ? t.amount : -t.amount;
-        }
-        return total;
-    },
+  getUserCapital() {
+    // Calculate user's net capital in the fund
+    const userTxns = this.capitalTransactions.filter(t => t.user_id === App.user.id);
+    let total = 0;
+    for (const t of userTxns) {
+      total += t.type === 'deposit' ? t.amount : -t.amount;
+    }
+    return total;
+  },
 
-    // ─── Strategies Tab ──────────────────────────────────────────────────────────
-    renderStrategiesTab() {
-        const canManage = this.currentFund.role === 'owner' || this.currentFund.role === 'analyst';
-        const allStrategies = [...this.strategies, ...this.customStrategies];
+  // ─── Strategies Tab ──────────────────────────────────────────────────────────
+  renderStrategiesTab() {
+    const canManage = this.currentFund.role === 'owner' || this.currentFund.role === 'analyst';
+    const allStrategies = [...this.strategies, ...this.customStrategies];
 
-        return `
+    return `
       <div class="strategies-section">
         ${canManage ? `
         <div class="section-actions">
@@ -341,14 +343,14 @@ const Funds = {
         `}
       </div>
     `;
-    },
+  },
 
-    renderStrategyCard(strategy, isCustom) {
-        const typeInfo = this.STRATEGY_TYPES[strategy.type] || { name: strategy.type, icon: '📈' };
-        const statusClass = strategy.is_active ? 'status-active' : 'status-stopped';
-        const statusText = strategy.is_active ? 'Active' : 'Stopped';
+  renderStrategyCard(strategy, isCustom) {
+    const typeInfo = this.STRATEGY_TYPES[strategy.type] || { name: strategy.type, icon: '📈' };
+    const statusClass = strategy.is_active ? 'status-active' : 'status-stopped';
+    const statusText = strategy.is_active ? 'Active' : 'Stopped';
 
-        return `
+    return `
       <div class="strategy-card ${strategy.is_active ? '' : 'inactive'}">
         <div class="strategy-card-header">
           <span class="strategy-icon">${typeInfo.icon}</span>
@@ -373,76 +375,76 @@ const Funds = {
         </div>
       </div>
     `;
-    },
+  },
 
-    // ─── Data Loading ────────────────────────────────────────────────────────────
-    async loadMyFunds() {
-        try {
-            this.myFunds = await Utils.get('/funds/my');
-        } catch (e) {
-            console.error('Failed to load funds:', e);
-            this.myFunds = [];
-        }
-    },
+  // ─── Data Loading ────────────────────────────────────────────────────────────
+  async loadMyFunds() {
+    try {
+      this.myFunds = await Utils.get('/funds/my');
+    } catch (e) {
+      console.error('Failed to load funds:', e);
+      this.myFunds = [];
+    }
+  },
 
-    async loadFundDetails(fundId) {
-        try {
-            const [fund, members, strategies, customStrategies, capital] = await Promise.all([
-                Utils.get('/funds/' + fundId),
-                Utils.get('/funds/' + fundId + '/members'),
-                Utils.get('/funds/' + fundId + '/strategies'),
-                Utils.get('/funds/' + fundId + '/custom-strategies'),
-                Utils.get('/funds/' + fundId + '/capital')
-            ]);
+  async loadFundDetails(fundId) {
+    try {
+      const [fund, members, strategies, customStrategies, capital] = await Promise.all([
+        Utils.get('/funds/' + fundId),
+        Utils.get('/funds/' + fundId + '/members'),
+        Utils.get('/funds/' + fundId + '/strategies'),
+        Utils.get('/funds/' + fundId + '/custom-strategies'),
+        Utils.get('/funds/' + fundId + '/capital')
+      ]);
 
-            // Get role from myFunds
-            const myFund = this.myFunds.find(f => f.id === fundId);
-            this.currentFund = { ...fund, role: myFund?.role || 'client' };
-            this.members = members;
-            this.strategies = strategies;
-            this.customStrategies = customStrategies;
-            this.capitalTransactions = capital;
-        } catch (e) {
-            console.error('Failed to load fund details:', e);
-            Utils.showToast('error', 'Load Failed', e.message);
-        }
-    },
+      // Get role from myFunds
+      const myFund = this.myFunds.find(f => f.id === fundId);
+      this.currentFund = { ...fund, role: myFund?.role || 'client' };
+      this.members = members;
+      this.strategies = strategies;
+      this.customStrategies = customStrategies;
+      this.capitalTransactions = capital;
+    } catch (e) {
+      console.error('Failed to load fund details:', e);
+      Utils.showToast('error', 'Load Failed', e.message);
+    }
+  },
 
-    // ─── Navigation ──────────────────────────────────────────────────────────────
-    async viewFund(fundId) {
-        await this.loadFundDetails(fundId);
-        this.currentTab = 'overview';
-        this.updateContent();
-    },
+  // ─── Navigation ──────────────────────────────────────────────────────────────
+  async viewFund(fundId) {
+    await this.loadFundDetails(fundId);
+    this.currentTab = 'overview';
+    this.updateContent();
+  },
 
-    backToList() {
-        this.currentFund = null;
-        this.members = [];
-        this.strategies = [];
-        this.customStrategies = [];
-        this.capitalTransactions = [];
-        this.updateContent();
-    },
+  backToList() {
+    this.currentFund = null;
+    this.members = [];
+    this.strategies = [];
+    this.customStrategies = [];
+    this.capitalTransactions = [];
+    this.updateContent();
+  },
 
-    switchTab(tab) {
-        this.currentTab = tab;
-        this.updateContent();
-    },
+  switchTab(tab) {
+    this.currentTab = tab;
+    this.updateContent();
+  },
 
-    updateContent() {
-        const container = document.querySelector('.funds-page');
-        if (container) {
-            container.innerHTML = this.renderContent();
-            this.bindEvents();
-        }
-    },
+  updateContent() {
+    const container = document.querySelector('.funds-page');
+    if (container) {
+      container.innerHTML = this.renderContent();
+      this.bindEvents();
+    }
+  },
 
-    // ─── Create Fund Modal ───────────────────────────────────────────────────────
-    showCreateFundModal() {
-        const modal = document.createElement('div');
-        modal.className = 'modal-overlay';
-        modal.id = 'create-fund-modal';
-        modal.innerHTML = `
+  // ─── Create Fund Modal ───────────────────────────────────────────────────────
+  showCreateFundModal() {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'create-fund-modal';
+    modal.innerHTML = `
       <div class="modal">
         <div class="modal-header">
           <h2>Create New Fund</h2>
@@ -487,50 +489,50 @@ const Funds = {
       </div>
     `;
 
-        document.body.appendChild(modal);
-    },
+    document.body.appendChild(modal);
+  },
 
-    async createFund() {
-        const name = document.getElementById('fund-name')?.value?.trim();
-        const strategyType = document.getElementById('fund-strategy-type')?.value;
-        const description = document.getElementById('fund-description')?.value?.trim();
-        const minInvestment = parseFloat(document.getElementById('fund-min-investment')?.value) || 0;
-        const managementFee = (parseFloat(document.getElementById('fund-management-fee')?.value) || 0) / 100;
-        const performanceFee = (parseFloat(document.getElementById('fund-performance-fee')?.value) || 0) / 100;
+  async createFund() {
+    const name = document.getElementById('fund-name')?.value?.trim();
+    const strategyType = document.getElementById('fund-strategy-type')?.value;
+    const description = document.getElementById('fund-description')?.value?.trim();
+    const minInvestment = parseFloat(document.getElementById('fund-min-investment')?.value) || 0;
+    const managementFee = (parseFloat(document.getElementById('fund-management-fee')?.value) || 0) / 100;
+    const performanceFee = (parseFloat(document.getElementById('fund-performance-fee')?.value) || 0) / 100;
 
-        if (!name) {
-            Utils.showToast('error', 'Validation Error', 'Fund name is required');
-            return;
-        }
+    if (!name) {
+      Utils.showToast('error', 'Validation Error', 'Fund name is required');
+      return;
+    }
 
-        try {
-            const result = await Utils.post('/funds', {
-                name,
-                strategy_type: strategyType,
-                description,
-                min_investment: minInvestment,
-                management_fee: managementFee,
-                performance_fee: performanceFee
-            });
+    try {
+      const result = await Utils.post('/funds', {
+        name,
+        strategy_type: strategyType,
+        description,
+        min_investment: minInvestment,
+        management_fee: managementFee,
+        performance_fee: performanceFee
+      });
 
-            Utils.showToast('info', 'Fund Created', `"${name}" has been created`);
-            document.getElementById('create-fund-modal')?.remove();
-            await this.loadMyFunds();
-            this.updateContent();
-        } catch (e) {
-            Utils.showToast('error', 'Create Failed', e.message);
-        }
-    },
+      Utils.showToast('info', 'Fund Created', `"${name}" has been created`);
+      document.getElementById('create-fund-modal')?.remove();
+      await this.loadMyFunds();
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Create Failed', e.message);
+    }
+  },
 
-    // ─── Edit Fund Modal ─────────────────────────────────────────────────────────
-    showEditFundModal() {
-        const fund = this.currentFund;
-        if (!fund) return;
+  // ─── Edit Fund Modal ─────────────────────────────────────────────────────────
+  showEditFundModal() {
+    const fund = this.currentFund;
+    if (!fund) return;
 
-        const modal = document.createElement('div');
-        modal.className = 'modal-overlay';
-        modal.id = 'edit-fund-modal';
-        modal.innerHTML = `
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'edit-fund-modal';
+    modal.innerHTML = `
       <div class="modal">
         <div class="modal-header">
           <h2>Edit Fund</h2>
@@ -576,66 +578,66 @@ const Funds = {
       </div>
     `;
 
-        document.body.appendChild(modal);
-    },
+    document.body.appendChild(modal);
+  },
 
-    async updateFund() {
-        const fundId = this.currentFund?.id;
-        if (!fundId) return;
+  async updateFund() {
+    const fundId = this.currentFund?.id;
+    if (!fundId) return;
 
-        const name = document.getElementById('fund-name')?.value?.trim();
-        const strategyType = document.getElementById('fund-strategy-type')?.value;
-        const description = document.getElementById('fund-description')?.value?.trim();
-        const minInvestment = parseFloat(document.getElementById('fund-min-investment')?.value) || 0;
-        const managementFee = (parseFloat(document.getElementById('fund-management-fee')?.value) || 0) / 100;
-        const performanceFee = (parseFloat(document.getElementById('fund-performance-fee')?.value) || 0) / 100;
+    const name = document.getElementById('fund-name')?.value?.trim();
+    const strategyType = document.getElementById('fund-strategy-type')?.value;
+    const description = document.getElementById('fund-description')?.value?.trim();
+    const minInvestment = parseFloat(document.getElementById('fund-min-investment')?.value) || 0;
+    const managementFee = (parseFloat(document.getElementById('fund-management-fee')?.value) || 0) / 100;
+    const performanceFee = (parseFloat(document.getElementById('fund-performance-fee')?.value) || 0) / 100;
 
-        try {
-            await Utils.post('/funds/' + fundId, {
-                name,
-                strategy_type: strategyType,
-                description,
-                min_investment: minInvestment,
-                management_fee: managementFee,
-                performance_fee: performanceFee
-            });
+    try {
+      await Utils.put('/funds/' + fundId, {
+        name,
+        strategy_type: strategyType,
+        description,
+        min_investment: minInvestment,
+        management_fee: managementFee,
+        performance_fee: performanceFee
+      });
 
-            Utils.showToast('info', 'Fund Updated', 'Changes saved successfully');
-            document.getElementById('edit-fund-modal')?.remove();
-            await this.loadFundDetails(fundId);
-            this.updateContent();
-        } catch (e) {
-            Utils.showToast('error', 'Update Failed', e.message);
-        }
-    },
+      Utils.showToast('info', 'Fund Updated', 'Changes saved successfully');
+      document.getElementById('edit-fund-modal')?.remove();
+      await this.loadFundDetails(fundId);
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Update Failed', e.message);
+    }
+  },
 
-    async deleteFund() {
-        const fundId = this.currentFund?.id;
-        const fundName = this.currentFund?.name;
-        if (!fundId) return;
+  async deleteFund() {
+    const fundId = this.currentFund?.id;
+    const fundName = this.currentFund?.name;
+    if (!fundId) return;
 
-        if (!confirm(`Are you sure you want to delete "${fundName}"? This action cannot be undone.`)) {
-            return;
-        }
+    if (!confirm(`Are you sure you want to delete "${fundName}"? This action cannot be undone.`)) {
+      return;
+    }
 
-        try {
-            await Utils.del('/funds/' + fundId);
-            Utils.showToast('info', 'Fund Deleted', `"${fundName}" has been deleted`);
-            document.getElementById('edit-fund-modal')?.remove();
-            this.backToList();
-            await this.loadMyFunds();
-            this.updateContent();
-        } catch (e) {
-            Utils.showToast('error', 'Delete Failed', e.message);
-        }
-    },
+    try {
+      await Utils.del('/funds/' + fundId);
+      Utils.showToast('info', 'Fund Deleted', `"${fundName}" has been deleted`);
+      document.getElementById('edit-fund-modal')?.remove();
+      this.backToList();
+      await this.loadMyFunds();
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Delete Failed', e.message);
+    }
+  },
 
-    // ─── Add Member Modal ────────────────────────────────────────────────────────
-    showAddMemberModal() {
-        const modal = document.createElement('div');
-        modal.className = 'modal-overlay';
-        modal.id = 'add-member-modal';
-        modal.innerHTML = `
+  // ─── Add Member Modal ────────────────────────────────────────────────────────
+  showAddMemberModal() {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'add-member-modal';
+    modal.innerHTML = `
       <div class="modal modal-sm">
         <div class="modal-header">
           <h2>Add Member</h2>
@@ -662,35 +664,35 @@ const Funds = {
       </div>
     `;
 
-        document.body.appendChild(modal);
-    },
+    document.body.appendChild(modal);
+  },
 
-    async addMember() {
-        const fundId = this.currentFund?.id;
-        const userId = document.getElementById('member-user-id')?.value?.trim();
-        const role = document.getElementById('member-role')?.value;
+  async addMember() {
+    const fundId = this.currentFund?.id;
+    const userId = document.getElementById('member-user-id')?.value?.trim();
+    const role = document.getElementById('member-role')?.value;
 
-        if (!userId) {
-            Utils.showToast('error', 'Validation Error', 'User ID is required');
-            return;
-        }
+    if (!userId) {
+      Utils.showToast('error', 'Validation Error', 'User ID is required');
+      return;
+    }
 
-        try {
-            await Utils.post('/funds/' + fundId + '/members', { user_id: userId, role });
-            Utils.showToast('info', 'Member Added', 'New member has been added to the fund');
-            document.getElementById('add-member-modal')?.remove();
-            this.members = await Utils.get('/funds/' + fundId + '/members');
-            this.updateContent();
-        } catch (e) {
-            Utils.showToast('error', 'Add Failed', e.message);
-        }
-    },
+    try {
+      await Utils.post('/funds/' + fundId + '/members', { user_id: userId, role });
+      Utils.showToast('info', 'Member Added', 'New member has been added to the fund');
+      document.getElementById('add-member-modal')?.remove();
+      this.members = await Utils.get('/funds/' + fundId + '/members');
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Add Failed', e.message);
+    }
+  },
 
-    showEditMemberModal(userId, currentRole) {
-        const modal = document.createElement('div');
-        modal.className = 'modal-overlay';
-        modal.id = 'edit-member-modal';
-        modal.innerHTML = `
+  showEditMemberModal(userId, currentRole) {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'edit-member-modal';
+    modal.innerHTML = `
       <div class="modal modal-sm">
         <div class="modal-header">
           <h2>Edit Member Role</h2>
@@ -712,45 +714,45 @@ const Funds = {
       </div>
     `;
 
-        document.body.appendChild(modal);
-    },
+    document.body.appendChild(modal);
+  },
 
-    async updateMember(userId) {
-        const fundId = this.currentFund?.id;
-        const role = document.getElementById('member-role')?.value;
+  async updateMember(userId) {
+    const fundId = this.currentFund?.id;
+    const role = document.getElementById('member-role')?.value;
 
-        try {
-            await Utils.post('/funds/' + fundId + '/members/' + userId, { role });
-            Utils.showToast('info', 'Member Updated', 'Role has been updated');
-            document.getElementById('edit-member-modal')?.remove();
-            this.members = await Utils.get('/funds/' + fundId + '/members');
-            this.updateContent();
-        } catch (e) {
-            Utils.showToast('error', 'Update Failed', e.message);
-        }
-    },
+    try {
+      await Utils.put('/funds/' + fundId + '/members/' + userId, { role });
+      Utils.showToast('info', 'Member Updated', 'Role has been updated');
+      document.getElementById('edit-member-modal')?.remove();
+      this.members = await Utils.get('/funds/' + fundId + '/members');
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Update Failed', e.message);
+    }
+  },
 
-    async removeMember(userId) {
-        const fundId = this.currentFund?.id;
-        if (!confirm('Are you sure you want to remove this member from the fund?')) return;
+  async removeMember(userId) {
+    const fundId = this.currentFund?.id;
+    if (!confirm('Are you sure you want to remove this member from the fund?')) return;
 
-        try {
-            await Utils.del('/funds/' + fundId + '/members/' + userId);
-            Utils.showToast('info', 'Member Removed', 'Member has been removed from the fund');
-            this.members = await Utils.get('/funds/' + fundId + '/members');
-            this.updateContent();
-        } catch (e) {
-            Utils.showToast('error', 'Remove Failed', e.message);
-        }
-    },
+    try {
+      await Utils.del('/funds/' + fundId + '/members/' + userId);
+      Utils.showToast('info', 'Member Removed', 'Member has been removed from the fund');
+      this.members = await Utils.get('/funds/' + fundId + '/members');
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Remove Failed', e.message);
+    }
+  },
 
-    // ─── Deposit/Withdraw Modals ─────────────────────────────────────────────────
-    showDepositModal() {
-        const userCash = App.user?.cash || 0;
-        const modal = document.createElement('div');
-        modal.className = 'modal-overlay';
-        modal.id = 'deposit-modal';
-        modal.innerHTML = `
+  // ─── Deposit/Withdraw Modals ─────────────────────────────────────────────────
+  showDepositModal() {
+    const userCash = App.user?.cash || 0;
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'deposit-modal';
+    modal.innerHTML = `
       <div class="modal modal-sm">
         <div class="modal-header">
           <h2>Deposit Capital</h2>
@@ -773,42 +775,42 @@ const Funds = {
       </div>
     `;
 
-        document.body.appendChild(modal);
-    },
+    document.body.appendChild(modal);
+  },
 
-    async depositCapital() {
-        const fundId = this.currentFund?.id;
-        const amount = parseFloat(document.getElementById('deposit-amount')?.value);
+  async depositCapital() {
+    const fundId = this.currentFund?.id;
+    const amount = parseFloat(document.getElementById('deposit-amount')?.value);
 
-        if (!amount || amount <= 0) {
-            Utils.showToast('error', 'Invalid Amount', 'Please enter a valid amount');
-            return;
-        }
+    if (!amount || amount <= 0) {
+      Utils.showToast('error', 'Invalid Amount', 'Please enter a valid amount');
+      return;
+    }
 
-        try {
-            await Utils.post('/funds/' + fundId + '/capital', { amount, type: 'deposit' });
-            Utils.showToast('info', 'Deposit Successful', `${Utils.money(amount)} has been deposited`);
-            document.getElementById('deposit-modal')?.remove();
+    try {
+      await Utils.post('/funds/' + fundId + '/capital', { amount, type: 'deposit' });
+      Utils.showToast('info', 'Deposit Successful', `${Utils.money(amount)} has been deposited`);
+      document.getElementById('deposit-modal')?.remove();
 
-            // Refresh data
-            const [capital, user] = await Promise.all([
-                Utils.get('/funds/' + fundId + '/capital'),
-                Utils.get('/me')
-            ]);
-            this.capitalTransactions = capital;
-            App.user = user;
-            this.updateContent();
-        } catch (e) {
-            Utils.showToast('error', 'Deposit Failed', e.message);
-        }
-    },
+      // Refresh data
+      const [capital, user] = await Promise.all([
+        Utils.get('/funds/' + fundId + '/capital'),
+        Utils.get('/me')
+      ]);
+      this.capitalTransactions = capital;
+      App.user = user;
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Deposit Failed', e.message);
+    }
+  },
 
-    showWithdrawModal() {
-        const userCapital = this.getUserCapital();
-        const modal = document.createElement('div');
-        modal.className = 'modal-overlay';
-        modal.id = 'withdraw-modal';
-        modal.innerHTML = `
+  showWithdrawModal() {
+    const userCapital = this.getUserCapital();
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'withdraw-modal';
+    modal.innerHTML = `
       <div class="modal modal-sm">
         <div class="modal-header">
           <h2>Withdraw Capital</h2>
@@ -831,42 +833,42 @@ const Funds = {
       </div>
     `;
 
-        document.body.appendChild(modal);
-    },
+    document.body.appendChild(modal);
+  },
 
-    async withdrawCapital() {
-        const fundId = this.currentFund?.id;
-        const amount = parseFloat(document.getElementById('withdraw-amount')?.value);
+  async withdrawCapital() {
+    const fundId = this.currentFund?.id;
+    const amount = parseFloat(document.getElementById('withdraw-amount')?.value);
 
-        if (!amount || amount <= 0) {
-            Utils.showToast('error', 'Invalid Amount', 'Please enter a valid amount');
-            return;
-        }
+    if (!amount || amount <= 0) {
+      Utils.showToast('error', 'Invalid Amount', 'Please enter a valid amount');
+      return;
+    }
 
-        try {
-            await Utils.post('/funds/' + fundId + '/capital', { amount, type: 'withdraw' });
-            Utils.showToast('info', 'Withdrawal Successful', `${Utils.money(amount)} has been withdrawn`);
-            document.getElementById('withdraw-modal')?.remove();
+    try {
+      await Utils.post('/funds/' + fundId + '/capital', { amount, type: 'withdrawal' });
+      Utils.showToast('info', 'Withdrawal Successful', `${Utils.money(amount)} has been withdrawn`);
+      document.getElementById('withdraw-modal')?.remove();
 
-            // Refresh data
-            const [capital, user] = await Promise.all([
-                Utils.get('/funds/' + fundId + '/capital'),
-                Utils.get('/me')
-            ]);
-            this.capitalTransactions = capital;
-            App.user = user;
-            this.updateContent();
-        } catch (e) {
-            Utils.showToast('error', 'Withdrawal Failed', e.message);
-        }
-    },
+      // Refresh data
+      const [capital, user] = await Promise.all([
+        Utils.get('/funds/' + fundId + '/capital'),
+        Utils.get('/me')
+      ]);
+      this.capitalTransactions = capital;
+      App.user = user;
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Withdrawal Failed', e.message);
+    }
+  },
 
-    // ─── Strategy Management ─────────────────────────────────────────────────────
-    showCreateStrategyModal() {
-        const modal = document.createElement('div');
-        modal.className = 'modal-overlay';
-        modal.id = 'create-strategy-modal';
-        modal.innerHTML = `
+  // ─── Strategy Management ─────────────────────────────────────────────────────
+  showCreateStrategyModal() {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'create-strategy-modal';
+    modal.innerHTML = `
       <div class="modal">
         <div class="modal-header">
           <h2>Create Strategy</h2>
@@ -927,95 +929,95 @@ const Funds = {
       </div>
     `;
 
-        document.body.appendChild(modal);
-        this.selectedStrategyType = null;
-    },
+    document.body.appendChild(modal);
+    this.selectedStrategyType = null;
+  },
 
-    selectStrategyType(type) {
-        this.selectedStrategyType = type;
+  selectStrategyType(type) {
+    this.selectedStrategyType = type;
 
-        // Update UI
-        document.querySelectorAll('.strategy-type-option').forEach(el => {
-            el.classList.toggle('selected', el.dataset.type === type);
+    // Update UI
+    document.querySelectorAll('.strategy-type-option').forEach(el => {
+      el.classList.toggle('selected', el.dataset.type === type);
+    });
+
+    document.getElementById('strategy-config-section').style.display = '';
+    document.getElementById('create-strategy-btn').style.display = '';
+
+    const isCustom = type === 'custom';
+    document.getElementById('prebuilt-config').style.display = isCustom ? 'none' : '';
+    document.getElementById('custom-code-section').style.display = isCustom ? '' : 'none';
+  },
+
+  async createStrategy() {
+    const fundId = this.currentFund?.id;
+    const name = document.getElementById('strategy-name')?.value?.trim();
+    const type = this.selectedStrategyType;
+
+    if (!name) {
+      Utils.showToast('error', 'Validation Error', 'Strategy name is required');
+      return;
+    }
+
+    if (!type) {
+      Utils.showToast('error', 'Validation Error', 'Please select a strategy type');
+      return;
+    }
+
+    try {
+      if (type === 'custom') {
+        const code = document.getElementById('strategy-code')?.value;
+        if (!code) {
+          Utils.showToast('error', 'Validation Error', 'Strategy code is required');
+          return;
+        }
+
+        await Utils.post('/custom-strategies', {
+          fund_id: fundId,
+          name,
+          code,
+          parameters: {}
         });
+      } else {
+        const ticker = document.getElementById('strategy-ticker')?.value;
 
-        document.getElementById('strategy-config-section').style.display = '';
-        document.getElementById('create-strategy-btn').style.display = '';
+        await Utils.post('/funds/' + fundId + '/strategies', {
+          name,
+          type,
+          config: { ticker }
+        });
+      }
 
-        const isCustom = type === 'custom';
-        document.getElementById('prebuilt-config').style.display = isCustom ? 'none' : '';
-        document.getElementById('custom-code-section').style.display = isCustom ? '' : 'none';
-    },
+      Utils.showToast('info', 'Strategy Created', `"${name}" has been created`);
+      document.getElementById('create-strategy-modal')?.remove();
 
-    async createStrategy() {
-        const fundId = this.currentFund?.id;
-        const name = document.getElementById('strategy-name')?.value?.trim();
-        const type = this.selectedStrategyType;
+      // Refresh strategies
+      const [strategies, customStrategies] = await Promise.all([
+        Utils.get('/funds/' + fundId + '/strategies'),
+        Utils.get('/funds/' + fundId + '/custom-strategies')
+      ]);
+      this.strategies = strategies;
+      this.customStrategies = customStrategies;
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Create Failed', e.message);
+    }
+  },
 
-        if (!name) {
-            Utils.showToast('error', 'Validation Error', 'Strategy name is required');
-            return;
-        }
+  showEditStrategyModal(strategyId, isCustom) {
+    const strategy = isCustom
+      ? this.customStrategies.find(s => s.id === strategyId)
+      : this.strategies.find(s => s.id === strategyId);
 
-        if (!type) {
-            Utils.showToast('error', 'Validation Error', 'Please select a strategy type');
-            return;
-        }
+    if (!strategy) return;
 
-        try {
-            if (type === 'custom') {
-                const code = document.getElementById('strategy-code')?.value;
-                if (!code) {
-                    Utils.showToast('error', 'Validation Error', 'Strategy code is required');
-                    return;
-                }
+    const config = typeof strategy.config === 'string' ? JSON.parse(strategy.config) : (strategy.config || {});
+    const parameters = typeof strategy.parameters === 'string' ? JSON.parse(strategy.parameters) : (strategy.parameters || {});
 
-                await Utils.post('/custom-strategies', {
-                    fund_id: fundId,
-                    name,
-                    code,
-                    parameters: {}
-                });
-            } else {
-                const ticker = document.getElementById('strategy-ticker')?.value;
-
-                await Utils.post('/funds/' + fundId + '/strategies', {
-                    name,
-                    type,
-                    config: { ticker }
-                });
-            }
-
-            Utils.showToast('info', 'Strategy Created', `"${name}" has been created`);
-            document.getElementById('create-strategy-modal')?.remove();
-
-            // Refresh strategies
-            const [strategies, customStrategies] = await Promise.all([
-                Utils.get('/funds/' + fundId + '/strategies'),
-                Utils.get('/funds/' + fundId + '/custom-strategies')
-            ]);
-            this.strategies = strategies;
-            this.customStrategies = customStrategies;
-            this.updateContent();
-        } catch (e) {
-            Utils.showToast('error', 'Create Failed', e.message);
-        }
-    },
-
-    showEditStrategyModal(strategyId, isCustom) {
-        const strategy = isCustom
-            ? this.customStrategies.find(s => s.id === strategyId)
-            : this.strategies.find(s => s.id === strategyId);
-
-        if (!strategy) return;
-
-        const config = typeof strategy.config === 'string' ? JSON.parse(strategy.config) : (strategy.config || {});
-        const parameters = typeof strategy.parameters === 'string' ? JSON.parse(strategy.parameters) : (strategy.parameters || {});
-
-        const modal = document.createElement('div');
-        modal.className = 'modal-overlay';
-        modal.id = 'edit-strategy-modal';
-        modal.innerHTML = `
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'edit-strategy-modal';
+    modal.innerHTML = `
       <div class="modal">
         <div class="modal-header">
           <h2>Edit Strategy</h2>
@@ -1059,89 +1061,89 @@ const Funds = {
       </div>
     `;
 
-        document.body.appendChild(modal);
-    },
+    document.body.appendChild(modal);
+  },
 
-    async updateStrategy(strategyId, isCustom) {
-        const fundId = this.currentFund?.id;
-        const name = document.getElementById('strategy-name')?.value?.trim();
-        const isActive = document.getElementById('strategy-active')?.checked;
+  async updateStrategy(strategyId, isCustom) {
+    const fundId = this.currentFund?.id;
+    const name = document.getElementById('strategy-name')?.value?.trim();
+    const isActive = document.getElementById('strategy-active')?.checked;
 
-        try {
-            if (isCustom) {
-                const code = document.getElementById('strategy-code')?.value;
-                await Utils.post('/custom-strategies/' + strategyId, {
-                    name,
-                    code,
-                    is_active: isActive
-                });
-            } else {
-                const ticker = document.getElementById('strategy-ticker')?.value;
-                await Utils.post('/strategies/' + strategyId, {
-                    name,
-                    config: { ticker }
-                });
-            }
+    try {
+      if (isCustom) {
+        const code = document.getElementById('strategy-code')?.value;
+        await Utils.put('/custom-strategies/' + strategyId, {
+          name,
+          code,
+          is_active: isActive
+        });
+      } else {
+        const ticker = document.getElementById('strategy-ticker')?.value;
+        await Utils.put('/strategies/' + strategyId, {
+          name,
+          config: { ticker }
+        });
+      }
 
-            Utils.showToast('info', 'Strategy Updated', 'Changes saved successfully');
-            document.getElementById('edit-strategy-modal')?.remove();
+      Utils.showToast('info', 'Strategy Updated', 'Changes saved successfully');
+      document.getElementById('edit-strategy-modal')?.remove();
 
-            // Refresh
-            const [strategies, customStrategies] = await Promise.all([
-                Utils.get('/funds/' + fundId + '/strategies'),
-                Utils.get('/funds/' + fundId + '/custom-strategies')
-            ]);
-            this.strategies = strategies;
-            this.customStrategies = customStrategies;
-            this.updateContent();
-        } catch (e) {
-            Utils.showToast('error', 'Update Failed', e.message);
-        }
-    },
+      // Refresh
+      const [strategies, customStrategies] = await Promise.all([
+        Utils.get('/funds/' + fundId + '/strategies'),
+        Utils.get('/funds/' + fundId + '/custom-strategies')
+      ]);
+      this.strategies = strategies;
+      this.customStrategies = customStrategies;
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Update Failed', e.message);
+    }
+  },
 
-    async startStrategy(strategyId, isCustom) {
-        try {
-            await Utils.post('/strategies/' + strategyId + '/start');
-            Utils.showToast('info', 'Strategy Started', 'Strategy is now active');
+  async startStrategy(strategyId, isCustom) {
+    try {
+      await Utils.post('/strategies/' + strategyId + '/start');
+      Utils.showToast('info', 'Strategy Started', 'Strategy is now active');
 
-            await this.refreshStrategies();
-        } catch (e) {
-            Utils.showToast('error', 'Start Failed', e.message);
-        }
-    },
+      await this.refreshStrategies();
+    } catch (e) {
+      Utils.showToast('error', 'Start Failed', e.message);
+    }
+  },
 
-    async stopStrategy(strategyId, isCustom) {
-        try {
-            await Utils.post('/strategies/' + strategyId + '/stop');
-            Utils.showToast('info', 'Strategy Stopped', 'Strategy has been stopped');
+  async stopStrategy(strategyId, isCustom) {
+    try {
+      await Utils.post('/strategies/' + strategyId + '/stop');
+      Utils.showToast('info', 'Strategy Stopped', 'Strategy has been stopped');
 
-            await this.refreshStrategies();
-        } catch (e) {
-            Utils.showToast('error', 'Stop Failed', e.message);
-        }
-    },
+      await this.refreshStrategies();
+    } catch (e) {
+      Utils.showToast('error', 'Stop Failed', e.message);
+    }
+  },
 
-    async deleteStrategy(strategyId, isCustom) {
-        if (!confirm('Are you sure you want to delete this strategy?')) return;
+  async deleteStrategy(strategyId, isCustom) {
+    if (!confirm('Are you sure you want to delete this strategy?')) return;
 
-        try {
-            await Utils.del('/strategies/' + strategyId);
-            Utils.showToast('info', 'Strategy Deleted', 'Strategy has been removed');
+    try {
+      await Utils.del('/strategies/' + strategyId);
+      Utils.showToast('info', 'Strategy Deleted', 'Strategy has been removed');
 
-            await this.refreshStrategies();
-        } catch (e) {
-            Utils.showToast('error', 'Delete Failed', e.message);
-        }
-    },
+      await this.refreshStrategies();
+    } catch (e) {
+      Utils.showToast('error', 'Delete Failed', e.message);
+    }
+  },
 
-    viewCustomStrategy(strategyId) {
-        const strategy = this.customStrategies.find(s => s.id === strategyId);
-        if (!strategy) return;
+  viewCustomStrategy(strategyId) {
+    const strategy = this.customStrategies.find(s => s.id === strategyId);
+    if (!strategy) return;
 
-        const modal = document.createElement('div');
-        modal.className = 'modal-overlay';
-        modal.id = 'view-strategy-modal';
-        modal.innerHTML = `
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'view-strategy-modal';
+    modal.innerHTML = `
       <div class="modal modal-lg">
         <div class="modal-header">
           <h2>${strategy.name} - Code</h2>
@@ -1157,53 +1159,53 @@ const Funds = {
       </div>
     `;
 
-        document.body.appendChild(modal);
-    },
+    document.body.appendChild(modal);
+  },
 
-    async testStrategy(strategyId) {
-        try {
-            const result = await Utils.post('/custom-strategies/' + strategyId + '/test', { test_data: {} });
-            Utils.showToast('info', 'Test Complete', 'Check console for results');
-            console.log('Strategy test result:', result);
-        } catch (e) {
-            Utils.showToast('error', 'Test Failed', e.message);
-        }
-    },
-
-    async refreshStrategies() {
-        const fundId = this.currentFund?.id;
-        const [strategies, customStrategies] = await Promise.all([
-            Utils.get('/funds/' + fundId + '/strategies'),
-            Utils.get('/funds/' + fundId + '/custom-strategies')
-        ]);
-        this.strategies = strategies;
-        this.customStrategies = customStrategies;
-        this.updateContent();
-    },
-
-    // ─── Event Binding ───────────────────────────────────────────────────────────
-    bindEvents() {
-        // Tab clicks
-        document.querySelectorAll('.fund-tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                this.switchTab(tab.dataset.tab);
-            });
-        });
-    },
-
-    // ─── Utilities ───────────────────────────────────────────────────────────────
-    escapeHtml(str) {
-        return str
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#039;');
-    },
-
-    destroy() {
-        if (Terminal._clockInterval) clearInterval(Terminal._clockInterval);
+  async testStrategy(strategyId) {
+    try {
+      const result = await Utils.post('/custom-strategies/' + strategyId + '/test', { test_data: {} });
+      Utils.showToast('info', 'Test Complete', 'Check console for results');
+      console.log('Strategy test result:', result);
+    } catch (e) {
+      Utils.showToast('error', 'Test Failed', e.message);
     }
+  },
+
+  async refreshStrategies() {
+    const fundId = this.currentFund?.id;
+    const [strategies, customStrategies] = await Promise.all([
+      Utils.get('/funds/' + fundId + '/strategies'),
+      Utils.get('/funds/' + fundId + '/custom-strategies')
+    ]);
+    this.strategies = strategies;
+    this.customStrategies = customStrategies;
+    this.updateContent();
+  },
+
+  // ─── Event Binding ───────────────────────────────────────────────────────────
+  bindEvents() {
+    // Tab clicks
+    document.querySelectorAll('.fund-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        this.switchTab(tab.dataset.tab);
+      });
+    });
+  },
+
+  // ─── Utilities ───────────────────────────────────────────────────────────────
+  escapeHtml(str) {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  },
+
+  destroy() {
+    if (Terminal._clockInterval) clearInterval(Terminal._clockInterval);
+  }
 };
 
 window.Funds = Funds;
