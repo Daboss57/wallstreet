@@ -648,9 +648,8 @@ const Funds = {
         </div>
         <div class="modal-body">
           <div class="form-group">
-            <label>User ID</label>
-            <input type="text" id="member-user-id" placeholder="Enter user ID">
-            <small class="form-hint">Ask the user for their user ID from their profile</small>
+            <label>Username</label>
+            <input type="text" id="member-username" placeholder="Enter username">
           </div>
           <div class="form-group">
             <label>Role</label>
@@ -672,16 +671,16 @@ const Funds = {
 
   async addMember() {
     const fundId = this.currentFund?.id;
-    const userId = document.getElementById('member-user-id')?.value?.trim();
+    const username = document.getElementById('member-username')?.value?.trim();
     const role = document.getElementById('member-role')?.value;
 
-    if (!userId) {
-      Utils.showToast('error', 'Validation Error', 'User ID is required');
+    if (!username) {
+      Utils.showToast('error', 'Validation Error', 'Username is required');
       return;
     }
 
     try {
-      await Utils.post('/funds/' + fundId + '/members', { user_id: userId, role });
+      await Utils.post('/funds/' + fundId + '/members', { username, role });
       Utils.showToast('info', 'Member Added', 'New member has been added to the fund');
       document.getElementById('add-member-modal')?.remove();
       this.members = await Utils.get('/funds/' + fundId + '/members');

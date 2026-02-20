@@ -493,9 +493,26 @@ router.put('/funds/:id', authenticate, requireFundOwner, asyncRoute(async (req, 
     res.json({ success: true, fund });
 }));
 
-// Delete fund (owner only)
+// Delete fund (owner only) — cascade delete all related records
 router.delete('/funds/:id', authenticate, requireFundOwner, asyncRoute(async (req, res) => {
-    await stmts.deleteFund.run(req.params.id);
+    const fundId = req.params.id;
+
+    // Delete strategy trades for all strategies in this fund
+    const strategies = await stmts.getStrategiesByFund.all(fundId);
+    const customStrategies = await stmts.getCustomStrategiesByFund.all(fundId);
+    for (const s of strategies) {
+        await stmts.deleteStrategyTrades.run(s.id);
+        await stmts.deleteStrategy.run(s.id);
+    }
+    for (const s of customStrategies) {
+        await stmts.deleteCustomStrategy.run(s.id);
+    }
+
+    // Delete capital, members, then the fund
+    await stmts.deleteFundCapital.run(fundId);
+    await stmts.deleteFundMembers.run(fundId);
+    await stmts.deleteFund.run(fundId);
+
     res.json({ success: true });
 }));
 
@@ -511,16 +528,23 @@ router.post('/funds/:id/members', authenticate, requireFundMember, asyncRoute(as
         return res.status(403).json({ error: 'Only owners and analysts can add members' });
     }
 
-    const { user_id, role: newRole } = req.body;
+    const { username, role: newRole } = req.body;
 
-    if (!user_id || !newRole) {
-        return res.status(400).json({ error: 'Missing required fields: user_id, role' });
+    if (!username || !newRole) {
+        return res.status(400).json({ error: 'Missing required fields: username, role' });
     }
 
     const validRoles = ['analyst', 'client'];
     if (!validRoles.includes(newRole)) {
         return res.status(400).json({ error: `Invalid role. Must be: ${validRoles.join(', ')}` });
     }
+
+    // Look up user by username
+    const targetUser = await stmts.getUserByUsername.get(username.toLowerCase());
+    if (!targetUser) {
+        return res.status(404).json({ error: `User "${username}" not found` });
+    }
+    const user_id = targetUser.id;
 
     // Check if already a member
     const existing = await stmts.getFundMember.get(req.params.id, user_id);

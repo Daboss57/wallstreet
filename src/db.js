@@ -283,6 +283,7 @@ const SQL = {
     getUserFunds: 'SELECT f.*, fm.role FROM funds f JOIN fund_members fm ON f.id = fm.fund_id WHERE fm.user_id = $1 ORDER BY fm.joined_at DESC',
     updateFundMemberRole: 'UPDATE fund_members SET role = $1 WHERE fund_id = $2 AND user_id = $3',
     deleteFundMember: 'DELETE FROM fund_members WHERE fund_id = $1 AND user_id = $2',
+    deleteFundMembers: 'DELETE FROM fund_members WHERE fund_id = $1',
 
     // Fund Capital CRUD
     insertFundCapital: 'INSERT INTO fund_capital (id, fund_id, user_id, amount, type, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
@@ -290,6 +291,7 @@ const SQL = {
     getFundCapitalTransactions: 'SELECT fc.*, u.username FROM fund_capital fc JOIN users u ON fc.user_id = u.id WHERE fc.fund_id = $1 ORDER BY fc.created_at DESC',
     getUserCapitalInFund: 'SELECT * FROM fund_capital WHERE fund_id = $1 AND user_id = $2 ORDER BY created_at DESC',
     getFundCapitalSummary: 'SELECT user_id, SUM(CASE WHEN type = $2 THEN amount ELSE -amount END) as total_capital FROM fund_capital WHERE fund_id = $1 GROUP BY user_id',
+    deleteFundCapital: 'DELETE FROM fund_capital WHERE fund_id = $1',
 
     // Strategy CRUD
     insertStrategy: 'INSERT INTO strategies (id, fund_id, name, type, config, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
@@ -303,6 +305,7 @@ const SQL = {
     insertStrategyTrade: 'INSERT INTO strategy_trades (id, strategy_id, ticker, side, quantity, price, executed_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
     getStrategyTrades: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 ORDER BY executed_at DESC LIMIT $2',
     getStrategyTradesByTicker: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 AND ticker = $2 ORDER BY executed_at DESC',
+    deleteStrategyTrades: 'DELETE FROM strategy_trades WHERE strategy_id = $1',
 
     // Custom Strategy CRUD
     insertCustomStrategy: 'INSERT INTO custom_strategies (id, fund_id, name, code, parameters, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
@@ -409,6 +412,7 @@ const stmts = {
     getUserFunds: makeStatement('getUserFunds', SQL.getUserFunds),
     updateFundMemberRole: makeStatement('updateFundMemberRole', SQL.updateFundMemberRole),
     deleteFundMember: makeStatement('deleteFundMember', SQL.deleteFundMember),
+    deleteFundMembers: makeStatement('deleteFundMembers', SQL.deleteFundMembers),
 
     // Fund Capital CRUD
     insertFundCapital: makeStatement('insertFundCapital', SQL.insertFundCapital),
@@ -416,6 +420,7 @@ const stmts = {
     getFundCapitalTransactions: makeStatement('getFundCapitalTransactions', SQL.getFundCapitalTransactions),
     getUserCapitalInFund: makeStatement('getUserCapitalInFund', SQL.getUserCapitalInFund),
     getFundCapitalSummary: makeStatement('getFundCapitalSummary', SQL.getFundCapitalSummary),
+    deleteFundCapital: makeStatement('deleteFundCapital', SQL.deleteFundCapital),
 
     // Strategy CRUD
     insertStrategy: makeStatement('insertStrategy', SQL.insertStrategy),
@@ -429,6 +434,7 @@ const stmts = {
     insertStrategyTrade: makeStatement('insertStrategyTrade', SQL.insertStrategyTrade),
     getStrategyTrades: makeStatement('getStrategyTrades', SQL.getStrategyTrades),
     getStrategyTradesByTicker: makeStatement('getStrategyTradesByTicker', SQL.getStrategyTradesByTicker),
+    deleteStrategyTrades: makeStatement('deleteStrategyTrades', SQL.deleteStrategyTrades),
 
     // Custom Strategy CRUD
     insertCustomStrategy: makeStatement('insertCustomStrategy', SQL.insertCustomStrategy),
