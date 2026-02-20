@@ -546,6 +546,7 @@ module.exports = {
     isDbHealthy,
     isDbUnavailableError,
     withDbRetry,
+    runInTransaction,
     stmts,
     batchUpsertCandles,
     batchUpsertPriceStates,

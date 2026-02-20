@@ -56,6 +56,8 @@ const Terminal = {
 
   renderHeader() {
     const user = App.user || {};
+    const currentHash = window.location.hash || '#/terminal';
+    const activeClass = (route) => (currentHash === route ? 'active' : '');
     return `
       <div class="terminal-header">
         <div class="header-left">
@@ -71,12 +73,13 @@ const Terminal = {
         </div>
         <div class="header-right">
           <nav class="header-nav">
-            <a href="#/terminal" class="active">Terminal</a>
-            <a href="#/markets">Markets</a>
-            <a href="#/portfolio">Portfolio</a>
-            <a href="#/funds">Funds</a>
-            <a href="#/leaderboard">Leaderboard</a>
-            <a href="#/news">News</a>
+            <a href="#/terminal" class="${activeClass('#/terminal')}">Terminal</a>
+            <a href="#/markets" class="${activeClass('#/markets')}">Markets</a>
+            <a href="#/portfolio" class="${activeClass('#/portfolio')}">Portfolio</a>
+            <a href="#/funds" class="${activeClass('#/funds')}">Funds</a>
+            <a href="#/account" class="${activeClass('#/account')}">Account</a>
+            <a href="#/leaderboard" class="${activeClass('#/leaderboard')}">Leaderboard</a>
+            <a href="#/news" class="${activeClass('#/news')}">News</a>
           </nav>
           <div class="header-balance">
             <span class="balance-label">Balance</span>

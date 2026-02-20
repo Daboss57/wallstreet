@@ -797,9 +797,16 @@ const Funds = {
   async depositCapital() {
     const fundId = this.currentFund?.id;
     const amount = parseFloat(document.getElementById('deposit-amount')?.value);
+    const availableCash = Number(App.user?.cash || 0);
+
+    if (!fundId) return;
 
     if (!amount || amount <= 0) {
       Utils.showToast('error', 'Invalid Amount', 'Please enter a valid amount');
+      return;
+    }
+    if (amount > availableCash) {
+      Utils.showToast('error', 'Insufficient Cash', `You only have ${Utils.money(availableCash)} available`);
       return;
     }
 
@@ -815,6 +822,8 @@ const Funds = {
       ]);
       this.capitalTransactions = capital;
       App.user = user;
+      const cashEl = document.getElementById('header-cash');
+      if (cashEl) cashEl.textContent = Utils.money(user.cash);
       this.updateContent();
     } catch (e) {
       Utils.showToast('error', 'Deposit Failed', e.message);
@@ -855,9 +864,16 @@ const Funds = {
   async withdrawCapital() {
     const fundId = this.currentFund?.id;
     const amount = parseFloat(document.getElementById('withdraw-amount')?.value);
+    const availableCapital = this.getUserCapital();
+
+    if (!fundId) return;
 
     if (!amount || amount <= 0) {
       Utils.showToast('error', 'Invalid Amount', 'Please enter a valid amount');
+      return;
+    }
+    if (amount > availableCapital) {
+      Utils.showToast('error', 'Insufficient Capital', `You only have ${Utils.money(availableCapital)} in this fund`);
       return;
     }
 
@@ -873,6 +889,8 @@ const Funds = {
       ]);
       this.capitalTransactions = capital;
       App.user = user;
+      const cashEl = document.getElementById('header-cash');
+      if (cashEl) cashEl.textContent = Utils.money(user.cash);
       this.updateContent();
     } catch (e) {
       Utils.showToast('error', 'Withdrawal Failed', e.message);

@@ -1,6 +1,6 @@
 const express = require('express');
 const { v4: uuid } = require('uuid');
-const { stmts, isDbUnavailableError } = require('./db');
+const { stmts, isDbUnavailableError, runInTransaction } = require('./db');
 const { register, login, authenticate } = require('./auth');
 const engine = require('./engine');
 const orderbook = require('./orderbook');
@@ -619,15 +619,17 @@ router.delete('/funds/:id/members/:userId', authenticate, requireFundOwner, asyn
 
 // Deposit/withdraw capital (auth required)
 router.post('/funds/:id/capital', authenticate, requireFundMember, asyncRoute(async (req, res) => {
-    const { amount, type } = req.body;
+    const { amount: rawAmount, type } = req.body;
+    const parsedAmount = Number(rawAmount);
 
-    if (!amount || !type) {
+    if (!Number.isFinite(parsedAmount) || !type) {
         return res.status(400).json({ error: 'Missing required fields: amount, type' });
     }
 
-    if (amount <= 0) {
+    if (parsedAmount <= 0) {
         return res.status(400).json({ error: 'Amount must be positive' });
     }
+    const amount = +parsedAmount.toFixed(2);
 
     const validTypes = ['deposit', 'withdrawal'];
     if (!validTypes.includes(type)) {
@@ -635,10 +637,51 @@ router.post('/funds/:id/capital', authenticate, requireFundMember, asyncRoute(as
     }
 
     const capitalId = uuid();
-    await stmts.insertFundCapital.run(capitalId, req.params.id, req.user.id, amount, type, Date.now());
+    const now = Date.now();
 
-    const transaction = await stmts.getFundCapitalById.get(capitalId);
-    res.status(201).json({ success: true, transaction });
+    const result = await runInTransaction('fundsCapitalTransfer', async (client) => {
+        const userResult = await client.query(
+            'SELECT cash FROM users WHERE id = $1 FOR UPDATE',
+            [req.user.id]
+        );
+        if (userResult.rowCount === 0) {
+            return { error: 'User not found', status: 404 };
+        }
+
+        const userCash = Number(userResult.rows[0].cash);
+
+        const userCapitalRows = await client.query(
+            'SELECT amount, type FROM fund_capital WHERE fund_id = $1 AND user_id = $2 FOR UPDATE',
+            [req.params.id, req.user.id]
+        );
+        const userCapital = userCapitalRows.rows.reduce((total, row) => {
+            return total + (row.type === 'deposit' ? Number(row.amount) : -Number(row.amount));
+        }, 0);
+
+        if (type === 'deposit' && amount > userCash + 1e-6) {
+            return { error: `Insufficient cash. Available ${userCash.toFixed(2)}`, status: 400 };
+        }
+        if (type === 'withdrawal' && amount > userCapital + 1e-6) {
+            return { error: `Insufficient capital in fund. Available ${userCapital.toFixed(2)}`, status: 400 };
+        }
+
+        const newCash = +(type === 'deposit' ? userCash - amount : userCash + amount).toFixed(2);
+        await client.query('UPDATE users SET cash = $1 WHERE id = $2', [newCash, req.user.id]);
+
+        const insertResult = await client.query(
+            'INSERT INTO fund_capital (id, fund_id, user_id, amount, type, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+            [capitalId, req.params.id, req.user.id, amount, type, now]
+        );
+
+        const newUserCapital = +(type === 'deposit' ? userCapital + amount : userCapital - amount).toFixed(2);
+        return { transaction: insertResult.rows[0], cash: newCash, userCapital: newUserCapital };
+    });
+
+    if (result.error) {
+        return res.status(result.status || 400).json({ error: result.error });
+    }
+
+    res.status(201).json({ success: true, transaction: result.transaction, cash: result.cash, userCapital: result.userCapital });
 }));
 
 // Get capital transactions (fund members only)

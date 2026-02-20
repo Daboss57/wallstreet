@@ -1594,6 +1594,88 @@ select {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
+   ACCOUNT PAGE
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.account-page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px;
+  background: var(--bg-primary);
+}
+
+.account-header {
+  margin-bottom: 24px;
+}
+
+.account-header h1 {
+  font-size: 1.8rem;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.account-header .page-subtitle {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+
+.account-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.account-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 24px;
+}
+
+.account-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+}
+
+.account-card h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 14px;
+}
+
+.account-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+
+.account-field {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+}
+
+.account-label {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.account-value {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
    LEADERBOARD PAGE
    ═══════════════════════════════════════════════════════════════════════════════ */
 .leaderboard-page {
@@ -1948,6 +2030,14 @@ select {
   }
 
   .portfolio-summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .account-overview-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .account-profile-grid {
     grid-template-columns: repeat(2, 1fr);
   }
 }
@@ -2711,6 +2801,11 @@ select {
     padding: 10px 14px;
     font-size: 0.8rem;
     white-space: nowrap;
+  }
+
+  .account-overview-grid,
+  .account-profile-grid {
+    grid-template-columns: 1fr;
   }
 }
 

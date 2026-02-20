@@ -75,6 +75,10 @@ const App = {
                 this.currentPage = Funds;
                 Funds.render(container);
                 break;
+            case '#/account':
+                this.currentPage = Account;
+                Account.render(container);
+                break;
             default:
                 window.location.hash = '#/';
         }
