@@ -1022,7 +1022,8 @@ router.get('/funds/:fundId/strategies', authenticate, asyncRoute(async (req, res
     if (!membership) {
         return res.status(403).json({ error: 'Not a member of this fund' });
     }
-    const strategies = await stmts.getStrategiesByFund.all(fundId);
+    const strategies = (await stmts.getStrategiesByFund.all(fundId))
+        .filter((strategy) => strategy.type !== 'custom');
     const enriched = await Promise.all(strategies.map(async (strategy) => {
         const latest = await stmts.getLatestStrategyBacktest.get(strategy.id);
         return {
@@ -1311,6 +1312,26 @@ router.post('/strategies/:id/stop', authenticate, asyncRoute(async (req, res) =>
 // CUSTOM STRATEGY ENDPOINTS
 // ============================================================
 
+function parseJsonObject(value, fallback = {}) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+    if (typeof value === 'string') {
+        try {
+            const parsed = JSON.parse(value);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+        } catch {
+            return fallback;
+        }
+    }
+    return fallback;
+}
+
+function buildCustomStrategyShadowConfig(strategyId, parameters) {
+    return {
+        customStrategyId: strategyId,
+        parameters: parseJsonObject(parameters, {}),
+    };
+}
+
 // Validate that code looks like a function
 function validateStrategyCode(code) {
     if (typeof code !== 'string' || code.trim().length === 0) {
@@ -1346,16 +1367,17 @@ router.post('/custom-strategies', authenticate, asyncRoute(async (req, res) => {
     const strategyId = uuid();
     const now = Date.now();
 
-    await stmts.insertCustomStrategy.run(
-        strategyId,
-        fund_id,
-        name,
-        code,
-        JSON.stringify(parameters || {}),
-        true,
-        now,
-        now
-    );
+    const normalizedParams = parseJsonObject(parameters, {});
+    await runInTransaction('create_custom_strategy', async (client) => {
+        await client.query(
+            'INSERT INTO custom_strategies (id, fund_id, name, code, parameters, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+            [strategyId, fund_id, name, code, JSON.stringify(normalizedParams), true, now, now]
+        );
+        await client.query(
+            'INSERT INTO strategies (id, fund_id, name, type, config, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+            [strategyId, fund_id, name, 'custom', JSON.stringify(buildCustomStrategyShadowConfig(strategyId, normalizedParams)), true, now, now]
+        );
+    });
 
     const strategy = await stmts.getCustomStrategyById.get(strategyId);
     res.status(201).json({ success: true, strategy });
@@ -1412,14 +1434,42 @@ router.put('/custom-strategies/:id', authenticate, asyncRoute(async (req, res) =
     }
 
     const now = Date.now();
+    const nextName = name || strategy.name;
+    const nextCode = code !== undefined ? code : strategy.code;
+    const nextParams = parseJsonObject(parameters !== undefined ? parameters : strategy.parameters, {});
+    const nextIsActive = is_active !== undefined ? is_active : strategy.is_active;
+
     await stmts.updateCustomStrategy.run(
-        name || strategy.name,
-        code !== undefined ? code : strategy.code,
-        JSON.stringify(parameters !== undefined ? parameters : strategy.parameters),
-        is_active !== undefined ? is_active : strategy.is_active,
+        nextName,
+        nextCode,
+        JSON.stringify(nextParams),
+        nextIsActive,
         now,
         req.params.id
     );
+
+    const existingShadow = await stmts.getStrategyById.get(req.params.id);
+    if (existingShadow) {
+        await stmts.updateStrategy.run(
+            nextName,
+            'custom',
+            JSON.stringify(buildCustomStrategyShadowConfig(req.params.id, nextParams)),
+            nextIsActive,
+            now,
+            req.params.id
+        );
+    } else {
+        await stmts.insertStrategy.run(
+            req.params.id,
+            strategy.fund_id,
+            nextName,
+            'custom',
+            JSON.stringify(buildCustomStrategyShadowConfig(req.params.id, nextParams)),
+            nextIsActive,
+            Number(strategy.created_at) || now,
+            now
+        );
+    }
 
     const updated = await stmts.getCustomStrategyById.get(req.params.id);
     res.json({ success: true, strategy: updated });
@@ -1437,7 +1487,12 @@ router.delete('/custom-strategies/:id', authenticate, asyncRoute(async (req, res
         return res.status(403).json({ error: 'Owner access required for this fund' });
     }
 
-    await stmts.deleteCustomStrategy.run(req.params.id);
+    await runInTransaction('delete_custom_strategy', async (client) => {
+        await client.query('DELETE FROM strategy_trades WHERE strategy_id = $1', [req.params.id]);
+        await client.query('DELETE FROM strategy_backtests WHERE strategy_id = $1', [req.params.id]);
+        await client.query('DELETE FROM strategies WHERE id = $1', [req.params.id]);
+        await client.query('DELETE FROM custom_strategies WHERE id = $1', [req.params.id]);
+    });
     res.json({ success: true });
 }));
 
@@ -1461,13 +1516,16 @@ router.post('/custom-strategies/:id/test', authenticate, asyncRoute(async (req, 
             prices: engine.getAllPrices(),
             candles: {},
             ticker: (symbol) => engine.getPrice(symbol?.toUpperCase()),
+            getPrice: (symbol) => engine.getPrice(symbol?.toUpperCase()),
+            state: {},
+            parameters: parseJsonObject(strategy.parameters, {}),
             log: (...args) => console.log('[Strategy Test]', ...args),
         };
 
         // Build and execute the strategy function
         // Note: This is a simple test runner. In production, you'd want a proper sandbox.
         const fn = new Function('context', `
-            const { prices, candles, ticker, log } = context;
+            const { prices, candles, ticker, getPrice, state, parameters, log } = context;
             ${strategy.code}
             return typeof run === 'function' ? run(context) : (typeof strategy === 'function' ? strategy(context) : null);
         `);

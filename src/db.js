@@ -429,6 +429,7 @@ const SQL = {
     // Custom Strategy CRUD
     insertCustomStrategy: 'INSERT INTO custom_strategies (id, fund_id, name, code, parameters, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
     getCustomStrategyById: 'SELECT * FROM custom_strategies WHERE id = $1',
+    getAllCustomStrategies: 'SELECT * FROM custom_strategies ORDER BY created_at DESC',
     getCustomStrategiesByFund: 'SELECT * FROM custom_strategies WHERE fund_id = $1 ORDER BY created_at DESC',
     getActiveCustomStrategies: 'SELECT * FROM custom_strategies WHERE is_active = true ORDER BY created_at DESC',
     updateCustomStrategy: 'UPDATE custom_strategies SET name = $1, code = $2, parameters = $3, is_active = $4, updated_at = $5 WHERE id = $6',
@@ -582,6 +583,7 @@ const stmts = {
     // Custom Strategy CRUD
     insertCustomStrategy: makeStatement('insertCustomStrategy', SQL.insertCustomStrategy),
     getCustomStrategyById: makeStatement('getCustomStrategyById', SQL.getCustomStrategyById),
+    getAllCustomStrategies: makeStatement('getAllCustomStrategies', SQL.getAllCustomStrategies),
     getCustomStrategiesByFund: makeStatement('getCustomStrategiesByFund', SQL.getCustomStrategiesByFund),
     getActiveCustomStrategies: makeStatement('getActiveCustomStrategies', SQL.getActiveCustomStrategies),
     updateCustomStrategy: makeStatement('updateCustomStrategy', SQL.updateCustomStrategy),

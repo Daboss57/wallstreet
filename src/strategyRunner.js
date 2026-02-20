@@ -36,6 +36,26 @@ function toPositiveNumber(value, fallback = 0) {
     return parsed;
 }
 
+function parseJsonObject(value, fallback = {}) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+    if (typeof value === 'string') {
+        try {
+            const parsed = JSON.parse(value);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+        } catch {
+            return fallback;
+        }
+    }
+    return fallback;
+}
+
+function buildCustomStrategyShadowConfig(strategyId, parameters) {
+    return {
+        customStrategyId: strategyId,
+        parameters: parseJsonObject(parameters, {}),
+    };
+}
+
 function normalizeRiskSettings(settings = {}) {
     return {
         max_position_pct: clampNumber(settings.max_position_pct, FUND_RISK_DEFAULTS.max_position_pct, 1, 100),
@@ -351,6 +371,7 @@ function getOrCreateState(strategyId) {
             positions: {},    // ticker → { qty, avgEntry, side }
             realizedPnl: 0,
             signals: [],      // last 50 signals for activity log
+            customState: {},  // mutable bag for custom strategy code
             tradeCount: 0,
             winCount: 0,
             lossCount: 0,
@@ -367,6 +388,45 @@ function resetRuntimeState() {
     fundRiskDayState.clear();
     lastRunAt = 0;
     totalRuns = 0;
+}
+
+async function syncCustomStrategyShadows() {
+    const customStrategies = await stmts.getAllCustomStrategies.all();
+    for (const custom of customStrategies || []) {
+        const shadow = await stmts.getStrategyById.get(custom.id);
+        const shadowConfig = JSON.stringify(buildCustomStrategyShadowConfig(custom.id, custom.parameters));
+        if (!shadow) {
+            await stmts.insertStrategy.run(
+                custom.id,
+                custom.fund_id,
+                custom.name,
+                'custom',
+                shadowConfig,
+                Boolean(custom.is_active),
+                Number(custom.created_at) || Date.now(),
+                Number(custom.updated_at) || Date.now()
+            );
+            continue;
+        }
+        if (shadow.type !== 'custom') continue;
+
+        const needsUpdate = (
+            shadow.name !== custom.name
+            || shadow.fund_id !== custom.fund_id
+            || Boolean(shadow.is_active) !== Boolean(custom.is_active)
+            || JSON.stringify(parseJsonObject(shadow.config, {})) !== JSON.stringify(parseJsonObject(shadowConfig, {}))
+        );
+        if (!needsUpdate) continue;
+
+        await stmts.updateStrategy.run(
+            custom.name,
+            'custom',
+            shadowConfig,
+            Boolean(custom.is_active),
+            Number(custom.updated_at) || Date.now(),
+            custom.id
+        );
+    }
 }
 
 async function hydrateStateFromDb() {
@@ -421,12 +481,61 @@ async function hydrateStateFromDb() {
     );
 }
 
+async function executeCustomStrategy(strategy, config, state) {
+    const customStrategyId = String(config?.customStrategyId || strategy.id || '');
+    if (!customStrategyId) return { signal: 'hold', reason: 'custom_strategy_id_missing' };
+
+    const custom = await stmts.getCustomStrategyById.get(customStrategyId);
+    if (!custom) {
+        return { signal: 'hold', reason: 'custom_strategy_not_found' };
+    }
+
+    const parameters = parseJsonObject(custom.parameters, {});
+    const defaultTicker = String(parameters.ticker || config.ticker || '').toUpperCase();
+    const sandboxContext = {
+        strategy: {
+            id: strategy.id,
+            name: strategy.name,
+            fundId: strategy.fund_id,
+            type: strategy.type,
+        },
+        now: Date.now(),
+        prices: engine.getAllPrices(),
+        parameters,
+        config: parseJsonObject(config, {}),
+        state: state.customState || {},
+        ticker: (symbol) => engine.getPrice(String(symbol || '').toUpperCase()),
+        getPrice: (symbol) => engine.getPrice(String(symbol || '').toUpperCase()),
+        log: (...args) => console.log(`[CustomStrategy ${strategy.name}]`, ...args),
+    };
+
+    const fn = new Function('context', `
+        const { prices, ticker, getPrice, state, parameters, config, now, log } = context;
+        ${custom.code}
+        if (typeof run === 'function') return run(context);
+        if (typeof strategy === 'function') return strategy(context);
+        return null;
+    `);
+    const raw = fn(sandboxContext) || {};
+    const signal = String(raw.signal || raw.action || 'hold').toLowerCase();
+    const normalizedSignal = ['buy', 'sell', 'hold'].includes(signal) ? signal : 'hold';
+    const resultTicker = String(raw.ticker || defaultTicker || '').toUpperCase();
+    const qtyRaw = Number(raw.qty ?? raw.quantity);
+    const qty = Number.isFinite(qtyRaw) && qtyRaw > 0 ? Math.floor(qtyRaw) : null;
+
+    return {
+        signal: normalizedSignal,
+        ticker: resultTicker || null,
+        qty,
+        reason: raw.reason || '',
+        data: (raw.data && typeof raw.data === 'object' && !Array.isArray(raw.data)) ? raw.data : {},
+    };
+}
+
 // ─── Execute a single strategy ──────────────────────────────────────────────
 async function executeStrategy(strategy) {
     strategyFundMap.set(strategy.id, strategy.fund_id);
-    const config = typeof strategy.config === 'string'
-        ? JSON.parse(strategy.config)
-        : (strategy.config || {});
+    const config = parseJsonObject(strategy.config, {});
 
     const state = getOrCreateState(strategy.id);
     let result;
@@ -473,6 +582,10 @@ async function executeStrategy(strategy) {
                 });
                 break;
 
+            case 'custom':
+                result = await executeCustomStrategy(strategy, config, state);
+                break;
+
             default:
                 return;
         }
@@ -485,12 +598,12 @@ async function executeStrategy(strategy) {
 
     // Normalize signal
     const signal = (result.signal || result.action || 'hold').toLowerCase();
-    const ticker = result.ticker || config.ticker;
+    const ticker = String(result.ticker || config.ticker || '').toUpperCase();
 
     // Record signal in activity log
     state.signals.unshift({
         signal,
-        ticker,
+        ticker: ticker || '—',
         reason: result.reason || '',
         timestamp: Date.now(),
         data: result.data || {},
@@ -501,6 +614,7 @@ async function executeStrategy(strategy) {
 
     // Only record trades on buy/sell
     if (signal === 'hold') return;
+    if (!ticker) return;
 
     const priceData = engine.getPrice(ticker);
     if (!priceData) return;
@@ -508,8 +622,13 @@ async function executeStrategy(strategy) {
     const price = signal === 'buy' ? Number(priceData.ask) : Number(priceData.bid);
     if (!Number.isFinite(price) || price <= 0) return;
     const side = signal;
-    const sizing = await resolveStrategyTradeSizing(strategy, config, price);
-    const qty = sizing.qty;
+    let qty = Number.isFinite(Number(result.qty)) && Number(result.qty) > 0
+        ? Math.max(1, Math.floor(Number(result.qty)))
+        : 0;
+    if (!qty) {
+        const sizing = await resolveStrategyTradeSizing(strategy, config, price);
+        qty = sizing.qty;
+    }
     if (!Number.isFinite(qty) || qty <= 0) return;
     const now = Date.now();
     const tradeId = uuid();
@@ -638,6 +757,7 @@ async function runAll() {
 async function start() {
     if (runnerInterval) return;
     try {
+        await syncCustomStrategyShadows();
         await hydrateStateFromDb();
     } catch (err) {
         if (!isDbUnavailableError(err)) {

@@ -27,6 +27,60 @@ const Funds = {
     'pairs': { name: 'Pairs Trading', icon: '🔗', desc: 'Trade correlated asset pairs' },
     'custom': { name: 'Custom Strategy', icon: '⚙️', desc: 'Write your own trading logic' }
   },
+  CUSTOM_STRATEGY_TEMPLATES: {
+    momentum_breakout: {
+      name: 'Momentum Breakout',
+      code: `function run(context) {
+  const { ticker, parameters, state } = context;
+  const symbol = String(parameters.ticker || 'OGLD').toUpperCase();
+  const px = ticker(symbol);
+  if (!px || !Number.isFinite(px.price)) return { action: 'hold', ticker: symbol, reason: 'no_price' };
+
+  const lookback = Math.max(3, Number(parameters.lookback || 12));
+  const thresholdPct = Math.max(0.05, Number(parameters.thresholdPct || 0.35));
+
+  const history = Array.isArray(state.prices) ? state.prices : [];
+  history.push(px.price);
+  if (history.length > lookback + 2) history.shift();
+  state.prices = history;
+
+  if (history.length < lookback + 1) return { action: 'hold', ticker: symbol, reason: 'warming_up' };
+
+  const anchor = history[history.length - lookback - 1];
+  const movePct = ((px.price - anchor) / anchor) * 100;
+
+  if (movePct >= thresholdPct) return { action: 'buy', ticker: symbol, reason: 'breakout' };
+  if (movePct <= -thresholdPct) return { action: 'sell', ticker: symbol, reason: 'breakdown' };
+  return { action: 'hold', ticker: symbol, reason: 'inside_band' };
+}`
+    },
+    mean_reversion_band: {
+      name: 'Mean Reversion Band',
+      code: `function run(context) {
+  const { ticker, parameters, state } = context;
+  const symbol = String(parameters.ticker || 'EURUSD').toUpperCase();
+  const px = ticker(symbol);
+  if (!px || !Number.isFinite(px.price)) return { action: 'hold', ticker: symbol, reason: 'no_price' };
+
+  const windowSize = Math.max(5, Number(parameters.window || 20));
+  const bandPct = Math.max(0.05, Number(parameters.bandPct || 0.4));
+
+  const history = Array.isArray(state.prices) ? state.prices : [];
+  history.push(px.price);
+  if (history.length > windowSize) history.shift();
+  state.prices = history;
+
+  if (history.length < windowSize) return { action: 'hold', ticker: symbol, reason: 'warming_up' };
+
+  const mean = history.reduce((sum, n) => sum + n, 0) / history.length;
+  const deviationPct = ((px.price - mean) / mean) * 100;
+
+  if (deviationPct <= -bandPct) return { action: 'buy', ticker: symbol, reason: 'below_mean_band' };
+  if (deviationPct >= bandPct) return { action: 'sell', ticker: symbol, reason: 'above_mean_band' };
+  return { action: 'hold', ticker: symbol, reason: 'near_mean' };
+}`
+    }
+  },
 
   // ─── Main Render ────────────────────────────────────────────────────────────
   async render(container) {
@@ -1320,6 +1374,15 @@ const Funds = {
             </div>
 
             <div id="custom-code-section" style="display:none">
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Template</label>
+                  <select id="custom-template-select">${this.customTemplateOptionsHtml()}</select>
+                </div>
+                <div class="form-group" style="align-self:end">
+                  <button type="button" class="btn-secondary" onclick="Funds.applyCustomTemplate()">Load Template</button>
+                </div>
+              </div>
               <div class="form-group">
                 <label>Strategy Code (JavaScript)</label>
                 <textarea id="strategy-code" rows="10" placeholder="// function run(context) {
@@ -1327,7 +1390,7 @@ const Funds = {
 //   const aapl = ticker('AAPL');
 //   return { action: 'buy', ticker: 'AAPL', qty: 10 };
 // }"></textarea>
-                <small class="form-hint">Available: prices (all prices), ticker(symbol), log()</small>
+                <small class="form-hint">Available: prices, ticker(symbol), getPrice(symbol), state (persistent), parameters, log()</small>
               </div>
             </div>
           </div>
@@ -1359,6 +1422,24 @@ const Funds = {
     document.getElementById('prebuilt-config').style.display = isCustom ? 'none' : '';
     document.getElementById('custom-code-section').style.display = isCustom ? '' : 'none';
     document.getElementById('pairs-ticker-group').style.display = isPairs ? '' : 'none';
+    if (isCustom) {
+      this.applyCustomTemplate();
+    }
+  },
+
+  customTemplateOptionsHtml() {
+    return Object.entries(this.CUSTOM_STRATEGY_TEMPLATES)
+      .map(([key, template]) => `<option value="${key}">${template.name}</option>`)
+      .join('');
+  },
+
+  applyCustomTemplate() {
+    const select = document.getElementById('custom-template-select');
+    const textarea = document.getElementById('strategy-code');
+    if (!select || !textarea) return;
+    const template = this.CUSTOM_STRATEGY_TEMPLATES[select.value];
+    if (!template) return;
+    textarea.value = template.code;
   },
 
   async createStrategy() {

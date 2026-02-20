@@ -10,6 +10,14 @@ function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
+function mergeTickerStyle(base, override = {}) {
+    const merged = { ...base, ...override };
+    const baseFactors = base.factorLoadings || {};
+    const overrideFactors = override.factorLoadings || {};
+    merged.factorLoadings = { ...baseFactors, ...overrideFactors };
+    return merged;
+}
+
 const MARKET_VOLATILITY_MULTIPLIER = boundedFloat(process.env.MARKET_VOLATILITY_MULTIPLIER, 0.35, 0.05, 2.0);
 const MARKET_SHOCK_MULTIPLIER = boundedFloat(process.env.MARKET_SHOCK_MULTIPLIER, 0.55, 0.05, 2.0);
 const MARKET_SPREAD_MULTIPLIER = boundedFloat(process.env.MARKET_SPREAD_MULTIPLIER, 0.65, 0.05, 3.0);
@@ -104,6 +112,271 @@ const TICKERS = {
 
 const TICKER_LIST = Object.keys(TICKERS);
 
+const MARKET_FACTOR_NAMES = ['riskOn', 'usd', 'rates', 'energy', 'metals', 'crypto', 'vol'];
+const marketFactors = {
+    riskOn: 0,
+    usd: 0,
+    rates: 0,
+    energy: 0,
+    metals: 0,
+    crypto: 0,
+    vol: 0,
+};
+
+const DEFAULT_TICKER_STYLE = {
+    trendPersistence: 0.35,
+    idioShockMult: 1.0,
+    jumpProb: 0.002,
+    jumpScale: 2.1,
+    meanReversionMult: 1.0,
+    anchorFollow: 0.006,
+    dynamicAnchorWeight: 0.6,
+    spreadMult: 1.0,
+    volumeBase: 80,
+    volumeJitter: 520,
+    volumeMoveMult: 240,
+    volumeVolMult: 4.2,
+    volOfVol: 1.0,
+    maxTickMoveMult: 1.0,
+    factorLoadings: {
+        riskOn: 0,
+        usd: 0,
+        rates: 0,
+        energy: 0,
+        metals: 0,
+        crypto: 0,
+        vol: 0,
+    },
+};
+
+const TICKER_STYLE_OVERRIDES = {
+    AAPL: { trendPersistence: 0.56, factorLoadings: { riskOn: 0.75, rates: -0.22 } },
+    MSFT: { trendPersistence: 0.54, factorLoadings: { riskOn: 0.72, rates: -0.2 } },
+    NVDA: { idioShockMult: 1.45, jumpProb: 0.0045, jumpScale: 2.6, trendPersistence: 0.65, factorLoadings: { riskOn: 1.0, vol: -0.35 } },
+    TSLA: { idioShockMult: 1.55, jumpProb: 0.006, jumpScale: 2.9, trendPersistence: 0.68, factorLoadings: { riskOn: 1.1, rates: -0.26 } },
+    MOON: { idioShockMult: 2.3, jumpProb: 0.011, jumpScale: 3.4, trendPersistence: 0.73, spreadMult: 1.7, volumeMoveMult: 360, factorLoadings: { riskOn: 1.35, vol: -0.4 } },
+    BIOT: { idioShockMult: 1.45, jumpProb: 0.0055, jumpScale: 2.6 },
+    QNTM: { idioShockMult: 1.6, jumpProb: 0.007, jumpScale: 2.7 },
+    OGLD: { meanReversionMult: 1.25, dynamicAnchorWeight: 0.2, factorLoadings: { riskOn: -0.42, usd: -0.72, rates: -0.4, metals: 1.35, vol: 0.35 } },
+    SLVR: { idioShockMult: 1.18, factorLoadings: { riskOn: 0.08, usd: -0.62, metals: 1.4, energy: 0.16 } },
+    CRUD: { jumpProb: 0.0045, jumpScale: 2.55, idioShockMult: 1.22, factorLoadings: { energy: 1.45, usd: -0.35, riskOn: 0.2 } },
+    NATG: { jumpProb: 0.0068, jumpScale: 2.9, idioShockMult: 1.45, spreadMult: 1.28, factorLoadings: { energy: 1.85, usd: -0.28 } },
+    COPR: { factorLoadings: { riskOn: 0.45, usd: -0.4, metals: 0.65, energy: 0.24 } },
+    SPXF: { trendPersistence: 0.58, factorLoadings: { riskOn: 1.18, rates: -0.34, usd: -0.12, vol: -0.5 } },
+    NQFT: { trendPersistence: 0.62, idioShockMult: 1.12, factorLoadings: { riskOn: 1.32, rates: -0.46, usd: -0.1, vol: -0.62 } },
+    DOWF: { trendPersistence: 0.54, factorLoadings: { riskOn: 1.0, rates: -0.24, usd: -0.08, vol: -0.42 } },
+    VIXF: {
+        trendPersistence: 0.18,
+        idioShockMult: 1.48,
+        jumpProb: 0.0075,
+        jumpScale: 3.1,
+        meanReversionMult: 2.2,
+        dynamicAnchorWeight: 0.1,
+        spreadMult: 1.35,
+        factorLoadings: { riskOn: -2.35, vol: 2.1, rates: 0.22 },
+    },
+    SAFE: { trendPersistence: 0.2, idioShockMult: 0.55, meanReversionMult: 1.7, dynamicAnchorWeight: 0.12, spreadMult: 0.72, factorLoadings: { rates: -0.9, riskOn: -0.18, usd: 0.15 } },
+    BNKX: { trendPersistence: 0.47, factorLoadings: { riskOn: 0.62, rates: 0.72, vol: -0.2 } },
+    NRGY: { trendPersistence: 0.45, factorLoadings: { riskOn: 0.55, energy: 1.0, usd: -0.15 } },
+    MEDS: { trendPersistence: 0.42, factorLoadings: { riskOn: 0.45, rates: -0.18, vol: -0.15 } },
+    SEMX: { trendPersistence: 0.56, idioShockMult: 1.22, factorLoadings: { riskOn: 1.0, rates: -0.42, vol: -0.35 } },
+    REIT: { trendPersistence: 0.3, meanReversionMult: 1.25, factorLoadings: { rates: -0.82, riskOn: 0.28 } },
+    BTCX: {
+        trendPersistence: 0.66,
+        idioShockMult: 1.4,
+        jumpProb: 0.006,
+        jumpScale: 2.95,
+        meanReversionMult: 0.72,
+        spreadMult: 1.35,
+        volumeMoveMult: 340,
+        factorLoadings: { crypto: 1.7, riskOn: 0.9, usd: -0.55, vol: -0.45 },
+    },
+    ETHX: {
+        trendPersistence: 0.68,
+        idioShockMult: 1.58,
+        jumpProb: 0.0078,
+        jumpScale: 3.05,
+        meanReversionMult: 0.68,
+        spreadMult: 1.5,
+        volumeMoveMult: 360,
+        factorLoadings: { crypto: 1.95, riskOn: 1.02, usd: -0.62, vol: -0.5 },
+    },
+    SOLX: {
+        trendPersistence: 0.72,
+        idioShockMult: 1.95,
+        jumpProb: 0.01,
+        jumpScale: 3.25,
+        meanReversionMult: 0.55,
+        spreadMult: 1.72,
+        volumeMoveMult: 420,
+        factorLoadings: { crypto: 2.25, riskOn: 1.22, usd: -0.7, vol: -0.56 },
+    },
+    EURUSD: { trendPersistence: 0.28, idioShockMult: 0.8, meanReversionMult: 1.65, dynamicAnchorWeight: 0.2, spreadMult: 0.62, factorLoadings: { usd: -1.45, rates: 0.35, riskOn: 0.12 } },
+    GBPUSD: { trendPersistence: 0.3, idioShockMult: 0.86, meanReversionMult: 1.6, dynamicAnchorWeight: 0.24, spreadMult: 0.66, factorLoadings: { usd: -1.22, rates: 0.4, riskOn: 0.15 } },
+    USDJPY: { trendPersistence: 0.34, idioShockMult: 0.9, meanReversionMult: 1.45, dynamicAnchorWeight: 0.28, spreadMult: 0.68, factorLoadings: { usd: 1.18, rates: 0.6, riskOn: 0.35 } },
+};
+
+function buildClassStyle(definition) {
+    const style = { ...DEFAULT_TICKER_STYLE, factorLoadings: { ...DEFAULT_TICKER_STYLE.factorLoadings } };
+    if (definition.class === 'Stock') {
+        return mergeTickerStyle(style, {
+            trendPersistence: 0.5,
+            idioShockMult: 1.05,
+            jumpProb: 0.0032,
+            jumpScale: 2.35,
+            meanReversionMult: 0.9,
+            spreadMult: 0.95,
+            factorLoadings: { riskOn: 0.72, rates: -0.2, usd: -0.08, vol: -0.22 },
+        });
+    }
+    if (definition.class === 'Commodity') {
+        return mergeTickerStyle(style, {
+            trendPersistence: 0.4,
+            idioShockMult: 1.12,
+            jumpProb: 0.0038,
+            jumpScale: 2.45,
+            meanReversionMult: 1.15,
+            spreadMult: 1.05,
+            factorLoadings: { energy: 0.45, metals: 0.45, usd: -0.25, riskOn: 0.05, vol: 0.12 },
+        });
+    }
+    if (definition.class === 'Future') {
+        return mergeTickerStyle(style, {
+            trendPersistence: 0.52,
+            idioShockMult: 1.0,
+            jumpProb: 0.0028,
+            jumpScale: 2.2,
+            meanReversionMult: 0.95,
+            spreadMult: 0.92,
+            factorLoadings: { riskOn: 1.0, rates: -0.24, usd: -0.06, vol: -0.35 },
+        });
+    }
+    if (definition.class === 'ETF') {
+        return mergeTickerStyle(style, {
+            trendPersistence: 0.38,
+            idioShockMult: 0.85,
+            jumpProb: 0.0018,
+            jumpScale: 1.9,
+            meanReversionMult: 1.08,
+            spreadMult: 0.82,
+            factorLoadings: { riskOn: 0.44, rates: -0.12, usd: -0.05, vol: -0.12 },
+        });
+    }
+    if (definition.class === 'Crypto') {
+        return mergeTickerStyle(style, {
+            trendPersistence: 0.66,
+            idioShockMult: 1.45,
+            jumpProb: 0.0068,
+            jumpScale: 2.85,
+            meanReversionMult: 0.7,
+            spreadMult: 1.32,
+            volumeBase: 120,
+            volumeJitter: 900,
+            volumeMoveMult: 360,
+            factorLoadings: { crypto: 1.65, riskOn: 0.85, usd: -0.45, vol: -0.38 },
+        });
+    }
+    if (definition.class === 'Forex') {
+        return mergeTickerStyle(style, {
+            trendPersistence: 0.28,
+            idioShockMult: 0.8,
+            jumpProb: 0.0012,
+            jumpScale: 1.6,
+            meanReversionMult: 1.55,
+            dynamicAnchorWeight: 0.22,
+            spreadMult: 0.62,
+            volumeBase: 70,
+            volumeJitter: 360,
+            volumeMoveMult: 180,
+            factorLoadings: { usd: 0.7, rates: 0.28, riskOn: 0.08, vol: 0.05 },
+        });
+    }
+    return style;
+}
+
+function getTickerStyle(ticker, definition) {
+    const classStyle = buildClassStyle(definition);
+    const override = TICKER_STYLE_OVERRIDES[ticker] || {};
+    return mergeTickerStyle(classStyle, override);
+}
+
+const TICKER_STYLES = Object.fromEntries(
+    TICKER_LIST.map((ticker) => [ticker, getTickerStyle(ticker, TICKERS[ticker])])
+);
+
+function evolveFactor(name, {
+    persistence,
+    noiseScale,
+    jumpProb = 0,
+    jumpScale = 0,
+    clampAbs = 0.004,
+}) {
+    const prior = marketFactors[name] || 0;
+    let next = (prior * persistence) + (gaussianRandom() * noiseScale);
+    if (jumpProb > 0 && Math.random() < jumpProb) {
+        next += gaussianRandom() * jumpScale;
+    }
+    marketFactors[name] = clamp(next, -clampAbs, clampAbs);
+}
+
+function updateMarketFactors(now) {
+    evolveFactor('riskOn', { persistence: 0.97, noiseScale: 0.00008, jumpProb: 0.002, jumpScale: 0.00055, clampAbs: 0.0035 });
+    evolveFactor('usd', { persistence: 0.982, noiseScale: 0.00005, jumpProb: 0.0012, jumpScale: 0.00025, clampAbs: 0.0022 });
+    evolveFactor('rates', { persistence: 0.985, noiseScale: 0.000045, jumpProb: 0.001, jumpScale: 0.0002, clampAbs: 0.0018 });
+    evolveFactor('energy', { persistence: 0.973, noiseScale: 0.00009, jumpProb: 0.0025, jumpScale: 0.0006, clampAbs: 0.004 });
+    evolveFactor('metals', { persistence: 0.978, noiseScale: 0.000075, jumpProb: 0.0018, jumpScale: 0.00045, clampAbs: 0.0034 });
+    evolveFactor('crypto', { persistence: 0.963, noiseScale: 0.00013, jumpProb: 0.0038, jumpScale: 0.0009, clampAbs: 0.0056 });
+    evolveFactor('vol', { persistence: 0.955, noiseScale: 0.0001, jumpProb: 0.0028, jumpScale: 0.0008, clampAbs: 0.005 });
+
+    // Correlated spillovers to keep cross-asset structure coherent.
+    marketFactors.crypto = clamp(marketFactors.crypto + (marketFactors.riskOn * 0.035), -0.0056, 0.0056);
+    marketFactors.energy = clamp(marketFactors.energy + (marketFactors.usd * -0.018), -0.004, 0.004);
+    marketFactors.metals = clamp(marketFactors.metals + (marketFactors.usd * -0.02), -0.0034, 0.0034);
+    marketFactors.vol = clamp(marketFactors.vol + (marketFactors.riskOn * -0.04), -0.005, 0.005);
+
+    // Session effects: stronger risk transfer during US hours, stronger FX during London overlap.
+    const hour = new Date(now).getUTCHours();
+    if (hour >= 13 && hour <= 20) {
+        marketFactors.riskOn = clamp(marketFactors.riskOn * 1.04, -0.0035, 0.0035);
+        marketFactors.vol = clamp(marketFactors.vol * 1.06, -0.005, 0.005);
+    }
+    if (hour >= 7 && hour <= 16) {
+        marketFactors.usd = clamp(marketFactors.usd * 1.03, -0.0022, 0.0022);
+        marketFactors.rates = clamp(marketFactors.rates * 1.03, -0.0018, 0.0018);
+    }
+}
+
+function getSessionVolMultiplier(definition, now) {
+    const date = new Date(now);
+    const hour = date.getUTCHours();
+    const day = date.getUTCDay();
+
+    if (definition.class === 'Forex') {
+        if (hour >= 7 && hour <= 16) return 1.18;
+        if (hour >= 0 && hour <= 3) return 0.82;
+        return 0.95;
+    }
+    if (definition.class === 'Crypto') {
+        return day === 0 || day === 6 ? 1.14 : 1.03;
+    }
+    if (definition.class === 'Commodity') {
+        return (hour >= 12 && hour <= 20) ? 1.12 : 0.9;
+    }
+    if (definition.class === 'Stock' || definition.class === 'Future' || definition.class === 'ETF') {
+        return (hour >= 13 && hour <= 20) ? 1.2 : 0.84;
+    }
+    return 1.0;
+}
+
+function getFactorShock(style) {
+    const loadings = style.factorLoadings || {};
+    let sum = 0;
+    for (const name of MARKET_FACTOR_NAMES) {
+        sum += (marketFactors[name] || 0) * (loadings[name] || 0);
+    }
+    return sum;
+}
+
 // ─── Price State (hot in-memory for ultra low latency) ─────────────────────────
 const prices = {};          // ticker → { price, bid, ask, open, high, low, prevClose, volume, volatility }
 const orderFlowImpact = {}; // ticker → accumulated impact from user orders
@@ -160,6 +433,8 @@ async function initPrices() {
                 prevClose: clamp(s.prev_close || clampedPrice, priceBounds.minPrice, priceBounds.maxPrice),
                 volume: s.volume,
                 volatility: clamp(s.volatility, volRange.minVolatility, volRange.maxVolatility),
+                anchorPrice: clampedPrice,
+                lastReturn: 0,
             };
         } else {
             // Fresh start — small random offset from base
@@ -174,7 +449,9 @@ async function initPrices() {
                 low: startPrice,
                 prevClose: startPrice,
                 volume: 0,
-                volatility: volRange.baseVolatility
+                volatility: volRange.baseVolatility,
+                anchorPrice: startPrice,
+                lastReturn: 0,
             };
         }
         orderFlowImpact[ticker] = 0;
@@ -209,35 +486,51 @@ async function tick() {
     const tickData = [];
     const candlesToSave = [];
     const priceStates = [];
+    updateMarketFactors(now);
 
     for (const ticker of TICKER_LIST) {
         const def = TICKERS[ticker];
+        const style = TICKER_STYLES[ticker] || DEFAULT_TICKER_STYLE;
         const volRange = getVolatilityRange(def);
         const priceBounds = getPriceBounds(def);
         const state = prices[ticker];
         const oldPrice = state.price;
+        const sessionVolMult = getSessionVolMultiplier(def, now);
+        const factorShock = getFactorShock(style);
+        const priorReturn = Number(state.lastReturn || 0);
+        const anchorPrice = Number(state.anchorPrice || def.basePrice);
+        const maxTickMovePct = getMaxTickMovePct(def) * (style.maxTickMoveMult || 1);
 
         // ── GARCH volatility update ──
         const returnVal = oldPrice > 0 ? Math.log(state.price / (state.prevClose || state.price)) : 0;
         const omega = volRange.baseVolatility * volRange.baseVolatility * 0.03;
         const alpha = MARKET_GARCH_ALPHA;
         const beta = MARKET_GARCH_BETA;
+        const factorVariance = Math.abs(factorShock) * state.volatility * (style.volOfVol || 1) * 0.05;
         state.volatility = Math.sqrt(
-            omega + alpha * returnVal * returnVal + beta * state.volatility * state.volatility
+            omega + alpha * returnVal * returnVal + beta * state.volatility * state.volatility + factorVariance
         );
-        // Clamp volatility
-        const minVol = volRange.minVolatility;
-        const maxVol = volRange.maxVolatility;
-        state.volatility = Math.max(minVol, Math.min(maxVol, state.volatility));
+        const sessionVolScale = 1 + ((sessionVolMult - 1) * 0.35);
+        state.volatility *= sessionVolScale;
+        state.volatility = clamp(state.volatility, volRange.minVolatility, volRange.maxVolatility);
 
-        // ── Random drift (GBM) ──
+        // ── Factor + regime + idiosyncratic move ──
         const drift = def.drift;
-        const shock = gaussianRandom() * state.volatility * MARKET_SHOCK_MULTIPLIER;
-        let newPrice = oldPrice * Math.exp(drift + shock);
+        const trendCarry = priorReturn * (style.trendPersistence || 0);
+        const idioShock = gaussianRandom() * state.volatility * MARKET_SHOCK_MULTIPLIER * (style.idioShockMult || 1);
+        const jumpShock = Math.random() < (style.jumpProb || 0)
+            ? gaussianRandom() * state.volatility * (style.jumpScale || 1)
+            : 0;
+        let rawReturn = drift + factorShock + trendCarry + idioShock + jumpShock;
+        rawReturn = clamp(rawReturn, -maxTickMovePct, maxTickMovePct);
+        let newPrice = oldPrice * Math.exp(rawReturn);
 
         // ── Mean reversion ──
-        const deviation = (newPrice - def.basePrice) / def.basePrice;
-        newPrice -= deviation * def.meanRev * MARKET_MEAN_REVERSION_MULTIPLIER * oldPrice;
+        const updatedAnchor = anchorPrice + ((oldPrice - anchorPrice) * (style.anchorFollow || 0));
+        state.anchorPrice = updatedAnchor;
+        const targetAnchor = (def.basePrice * (1 - (style.dynamicAnchorWeight || 0))) + (updatedAnchor * (style.dynamicAnchorWeight || 0));
+        const deviation = targetAnchor > 0 ? (newPrice - targetAnchor) / targetAnchor : 0;
+        newPrice -= deviation * def.meanRev * MARKET_MEAN_REVERSION_MULTIPLIER * (style.meanReversionMult || 1) * oldPrice;
 
         // ── Order flow impact ──
         if (orderFlowImpact[ticker] !== 0) {
@@ -249,12 +542,13 @@ async function tick() {
         }
 
         // Hard movement/range guardrails to prevent crash-and-pump exploits.
-        const maxTickMove = oldPrice * getMaxTickMovePct(def);
+        const maxTickMove = oldPrice * maxTickMovePct;
         newPrice = clamp(newPrice, oldPrice - maxTickMove, oldPrice + maxTickMove);
         newPrice = clamp(newPrice, priceBounds.minPrice, priceBounds.maxPrice);
+        state.lastReturn = oldPrice > 0 ? Math.log(newPrice / oldPrice) : 0;
 
         // ── Update spread ──
-        const spread = newPrice * state.volatility * 0.05 * MARKET_SPREAD_MULTIPLIER;
+        const spread = newPrice * state.volatility * 0.05 * MARKET_SPREAD_MULTIPLIER * (style.spreadMult || 1);
         state.price = +newPrice.toFixed(getDecimals(ticker));
         state.bid = +(newPrice - spread / 2).toFixed(getDecimals(ticker));
         state.ask = +(newPrice + spread / 2).toFixed(getDecimals(ticker));
@@ -262,7 +556,11 @@ async function tick() {
         state.low = Math.min(state.low, state.price);
 
         // ── Volume simulation ──
-        const tickVolume = Math.floor(Math.random() * 500 + 50) * (1 + state.volatility * 4);
+        const absMovePct = oldPrice > 0 ? Math.abs(newPrice - oldPrice) / oldPrice : 0;
+        const baseVolume = (style.volumeBase || 80) + (Math.random() * (style.volumeJitter || 500));
+        const moveIntensity = 1 + (absMovePct * (style.volumeMoveMult || 220));
+        const volIntensity = 1 + (state.volatility * (style.volumeVolMult || 4));
+        const tickVolume = Math.max(1, Math.floor(baseVolume * moveIntensity * volIntensity * sessionVolMult));
         state.volume += tickVolume;
 
         // ── Update candle buffers ──
