@@ -14,6 +14,8 @@ const Terminal = {
   trades: [],
   _watchlistFilter: '',
   _bottomTab: 'positions',
+  _futurePreviewEnabled: false,
+  _futurePreviewLocked: false,
 
   async render(container) {
     // Load tickers
@@ -40,10 +42,20 @@ const Terminal = {
     if (chartEl) {
       ChartManager.init(chartEl);
       ChartManager.loadTicker(this.selectedTicker, '1m');
+      if (this._futurePreviewEnabled && !this._futurePreviewLocked) {
+        ChartManager.setFuturePreview(true).catch((e) => {
+          this._futurePreviewEnabled = false;
+          if ((e.message || '').toLowerCase().includes('not enabled for this account')) {
+            this._futurePreviewLocked = true;
+          }
+          this.syncFuturePreviewButton();
+        });
+      }
     }
 
     // Bind events
     this.bindEvents();
+    this.syncFuturePreviewButton();
     this.startClock();
     this.loadPortfolioData();
 
@@ -152,6 +164,7 @@ const Terminal = {
           </div>
         </div>
         <div class="chart-timeframes" id="chart-timeframes">
+          <button id="future-preview-toggle" class="future-preview-toggle ${this._futurePreviewEnabled ? 'active' : ''}" type="button" title="Simulated preview up to 5 minutes ahead">Future +5m</button>
           <button class="active" data-interval="1m">1m</button>
           <button data-interval="5m">5m</button>
           <button data-interval="15m">15m</button>
@@ -404,10 +417,16 @@ const Terminal = {
 
     // Timeframes
     document.getElementById('chart-timeframes')?.addEventListener('click', (e) => {
-      if (e.target.tagName !== 'BUTTON') return;
-      document.querySelectorAll('#chart-timeframes button').forEach(b => b.classList.remove('active'));
-      e.target.classList.add('active');
-      ChartManager.changeInterval(e.target.dataset.interval);
+      const button = e.target.closest('button');
+      if (!button) return;
+      if (button.id === 'future-preview-toggle') {
+        this.toggleFuturePreview();
+        return;
+      }
+      if (!button.dataset.interval) return;
+      document.querySelectorAll('#chart-timeframes button[data-interval]').forEach(b => b.classList.remove('active'));
+      button.classList.add('active');
+      ChartManager.changeInterval(button.dataset.interval);
     });
 
     // Order side tabs
@@ -500,6 +519,48 @@ const Terminal = {
         window.location.hash = hash;
       });
     });
+  },
+
+  async toggleFuturePreview() {
+    if (this._futurePreviewLocked) return;
+    const nextEnabled = !this._futurePreviewEnabled;
+    const button = document.getElementById('future-preview-toggle');
+    if (button) button.disabled = true;
+    try {
+      await ChartManager.setFuturePreview(nextEnabled);
+      this._futurePreviewEnabled = nextEnabled;
+      if (nextEnabled) {
+        Utils.showToast('info', 'Future Preview', 'Showing simulated candles up to 5 minutes ahead.');
+      }
+    } catch (e) {
+      this._futurePreviewEnabled = false;
+      if ((e.message || '').toLowerCase().includes('not enabled for this account')) {
+        this._futurePreviewLocked = true;
+        Utils.showToast('error', 'Future Preview Locked', 'This feature is not enabled for your account.');
+      } else {
+        Utils.showToast('error', 'Future Preview Error', e.message || 'Failed to load preview');
+      }
+    } finally {
+      if (button) button.disabled = false;
+      this.syncFuturePreviewButton();
+    }
+  },
+
+  syncFuturePreviewButton() {
+    const button = document.getElementById('future-preview-toggle');
+    if (!button) return;
+
+    button.classList.toggle('active', this._futurePreviewEnabled);
+    if (this._futurePreviewLocked) {
+      button.disabled = true;
+      button.textContent = 'Future +5m Locked';
+      button.title = 'Future preview is not enabled for this account';
+      return;
+    }
+
+    button.disabled = false;
+    button.textContent = this._futurePreviewEnabled ? 'Future +5m ON' : 'Future +5m';
+    button.title = 'Simulated preview up to 5 minutes ahead';
   },
 
   selectTicker(ticker) {
@@ -711,18 +772,12 @@ const Terminal = {
       // Update watchlist
       const priceEl = document.getElementById('wp-' + tick.ticker);
       const changeEl = document.getElementById('wc-' + tick.ticker);
-      const watchItem = document.getElementById('wi-' + tick.ticker);
 
       if (priceEl) {
         const oldText = priceEl.textContent;
         const newText = Utils.num(tick.price);
         if (oldText !== newText) {
           priceEl.textContent = newText;
-          if (watchItem) {
-            watchItem.classList.remove('flash-green', 'flash-red');
-            void watchItem.offsetWidth; // reflow
-            watchItem.classList.add(tick.change >= 0 ? 'flash-green' : 'flash-red');
-          }
         }
       }
       if (changeEl) {

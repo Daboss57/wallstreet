@@ -8,8 +8,13 @@ const strategyRunner = require('./strategyRunner');
 const backtester = require('./backtester');
 
 const router = express.Router();
-const MAX_ORDER_NOTIONAL_FRACTION = Math.max(0.05, Math.min(1, Number.parseFloat(process.env.MAX_ORDER_NOTIONAL_FRACTION || '0.35')));
 const MIN_ORDER_NOTIONAL = Math.max(1, Number.parseFloat(process.env.MIN_ORDER_NOTIONAL || '50'));
+const FUTURE_PREVIEW_ALLOWED_USERS = new Set(
+    String(process.env.FUTURE_PREVIEW_ALLOWED_USERS || 'noel')
+        .split(',')
+        .map((name) => name.trim().toLowerCase())
+        .filter(Boolean)
+);
 
 function handleRouteError(res, error, defaultStatus = 500) {
     if (isDbUnavailableError(error)) {
@@ -102,6 +107,34 @@ router.get('/candles/:ticker', asyncRoute(async (req, res) => {
     res.json(candles);
 }));
 
+router.get('/candles/:ticker/preview', authenticate, asyncRoute(async (req, res) => {
+    const ticker = String(req.params.ticker || '').toUpperCase();
+    const interval = String(req.query.interval || '1m');
+    const minutes = Math.max(1, Math.min(5, Number.parseInt(req.query.minutes, 10) || 5));
+
+    if (!engine.getTickerDef(ticker)) {
+        return res.status(400).json({ error: 'Invalid ticker' });
+    }
+    if (!engine.INTERVALS[interval]) {
+        return res.status(400).json({ error: 'Invalid interval' });
+    }
+
+    const user = await stmts.getUserById.get(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!canUseFuturePreview(user)) {
+        return res.status(403).json({ error: 'Future preview is not enabled for this account' });
+    }
+
+    const candles = engine.previewCandles(ticker, interval, minutes);
+    return res.json({
+        ticker,
+        interval,
+        minutes,
+        candles,
+        mode: 'simulated_projection',
+    });
+}));
+
 router.get('/orderbook/:ticker', asyncRoute(async (req, res) => {
     const { ticker } = req.params;
     const userOrders = await stmts.getOpenOrdersByTicker.all(ticker.toUpperCase());
@@ -150,15 +183,6 @@ router.post('/orders', authenticate, asyncRoute(async (req, res) => {
     }
     if (estimatedNotional < MIN_ORDER_NOTIONAL) {
         return res.status(400).json({ error: `Order notional must be at least $${MIN_ORDER_NOTIONAL.toFixed(2)}` });
-    }
-
-    if (side === 'buy') {
-        const maxOrderNotional = user.cash * MAX_ORDER_NOTIONAL_FRACTION;
-        if (estimatedNotional > maxOrderNotional) {
-            return res.status(400).json({
-                error: `Order too large. Max per order is ${(MAX_ORDER_NOTIONAL_FRACTION * 100).toFixed(0)}% of cash ($${maxOrderNotional.toFixed(2)}).`,
-            });
-        }
     }
 
     if (side === 'buy' && type === 'market' && priceData) {
@@ -420,6 +444,13 @@ function requireFundOwner(req, res, next) {
         req.membership = membership;
         next();
     })().catch(next);
+}
+
+function canUseFuturePreview(user) {
+    if (!user) return false;
+    const role = String(user.role || '').toLowerCase();
+    if (role === 'admin') return true;
+    return FUTURE_PREVIEW_ALLOWED_USERS.has(String(user.username || '').toLowerCase());
 }
 
 function clampNumber(value, fallback, min, max) {

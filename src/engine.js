@@ -408,6 +408,103 @@ function getCurrentCandle(ticker, interval) {
     return candleBuffers[ticker]?.[interval] || null;
 }
 
+function previewCandles(ticker, interval = '1m', minutesAhead = 5) {
+    const def = TICKERS[ticker];
+    const state = prices[ticker];
+    const intervalSecs = INTERVALS[interval];
+    const current = candleBuffers[ticker]?.[interval];
+    if (!def || !state || !intervalSecs || !current) return [];
+
+    const cappedMinutes = Math.max(1, Math.min(5, Number(minutesAhead) || 5));
+    const maxCandles = Math.max(1, Math.ceil((cappedMinutes * 60) / intervalSecs));
+    const horizonSeconds = Math.max(intervalSecs, cappedMinutes * 60);
+    const intervalMs = intervalSecs * 1000;
+    const now = Date.now();
+    const decimals = getDecimals(ticker);
+
+    const volRange = getVolatilityRange(def);
+    const priceBounds = getPriceBounds(def);
+
+    let simPrice = Number(state.price);
+    let simPrevClose = Number(state.prevClose || state.price || def.basePrice);
+    let simVol = clamp(Number(state.volatility || volRange.baseVolatility), volRange.minVolatility, volRange.maxVolatility);
+    let simOrderFlow = Number(orderFlowImpact[ticker] || 0);
+    let simCandle = {
+        openTime: current.openTime,
+        open: Number(current.open),
+        high: Number(current.high),
+        low: Number(current.low),
+        close: Number(current.close),
+        volume: Number(current.volume || 0),
+    };
+    const baseOpenTime = current.openTime;
+    const projected = [];
+
+    for (let i = 1; i <= horizonSeconds; i++) {
+        const oldPrice = simPrice;
+        const returnVal = oldPrice > 0 ? Math.log(oldPrice / (simPrevClose || oldPrice)) : 0;
+        const omega = volRange.baseVolatility * volRange.baseVolatility * 0.03;
+        simVol = Math.sqrt(
+            omega + MARKET_GARCH_ALPHA * returnVal * returnVal + MARKET_GARCH_BETA * simVol * simVol
+        );
+        simVol = clamp(simVol, volRange.minVolatility, volRange.maxVolatility);
+
+        const shock = gaussianRandom() * simVol * MARKET_SHOCK_MULTIPLIER;
+        let nextPrice = oldPrice * Math.exp(def.drift + shock);
+
+        const deviation = (nextPrice - def.basePrice) / def.basePrice;
+        nextPrice -= deviation * def.meanRev * MARKET_MEAN_REVERSION_MULTIPLIER * oldPrice;
+
+        if (simOrderFlow !== 0) {
+            const maxImpactAbs = oldPrice * MARKET_MAX_ORDER_FLOW_MOVE_PCT * getRiskMultiplier(def);
+            const appliedImpact = clamp(simOrderFlow, -maxImpactAbs, maxImpactAbs);
+            nextPrice += appliedImpact;
+            simOrderFlow *= MARKET_ORDER_FLOW_DECAY;
+            if (Math.abs(simOrderFlow) < oldPrice * 0.00005) simOrderFlow = 0;
+        }
+
+        const maxTickMove = oldPrice * getMaxTickMovePct(def);
+        nextPrice = clamp(nextPrice, oldPrice - maxTickMove, oldPrice + maxTickMove);
+        nextPrice = clamp(nextPrice, priceBounds.minPrice, priceBounds.maxPrice);
+
+        simPrice = +nextPrice.toFixed(decimals);
+        const tickVolume = Math.floor(Math.random() * 500 + 50) * (1 + simVol * 4);
+
+        const simulatedNow = now + i * 1000;
+        const expectedOpen = Math.floor(simulatedNow / intervalMs) * intervalMs;
+
+        if (expectedOpen > simCandle.openTime) {
+            if (simCandle.openTime > baseOpenTime) projected.push({ ...simCandle });
+            simCandle = {
+                openTime: expectedOpen,
+                open: simPrice,
+                high: simPrice,
+                low: simPrice,
+                close: simPrice,
+                volume: tickVolume,
+            };
+        } else {
+            simCandle.high = Math.max(simCandle.high, simPrice);
+            simCandle.low = Math.min(simCandle.low, simPrice);
+            simCandle.close = simPrice;
+            simCandle.volume += tickVolume;
+        }
+    }
+
+    if (simCandle.openTime > baseOpenTime) projected.push({ ...simCandle });
+
+    return projected.slice(0, maxCandles).map((c) => ({
+        ticker,
+        interval,
+        open_time: c.openTime,
+        open: +Number(c.open).toFixed(decimals),
+        high: +Number(c.high).toFixed(decimals),
+        low: +Number(c.low).toFixed(decimals),
+        close: +Number(c.close).toFixed(decimals),
+        volume: +Number(c.volume || 0).toFixed(0),
+    }));
+}
+
 function setTickCallback(cb) { tickCallback = cb; }
 function setNewsCallback(cb) { newsCallback = cb; }
 function getNewsCallback() { return newsCallback; }
@@ -477,6 +574,7 @@ module.exports = {
     start, stop, tick,
     pause, resume, isPaused,
     getPrice, getAllPrices, getTickerDef, getAllTickerDefs,
+    previewCandles,
     getCurrentCandle, addOrderFlowImpact, applyNewsShock,
     setTickCallback, setNewsCallback, getNewsCallback,
     getDecimals
