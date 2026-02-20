@@ -215,9 +215,12 @@ CREATE TABLE IF NOT EXISTS strategy_trades (
   ticker TEXT NOT NULL,
   side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
   quantity INTEGER NOT NULL,
-  price INTEGER NOT NULL,
+  price DOUBLE PRECISION NOT NULL,
   executed_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
 );
+ALTER TABLE strategy_trades
+  ALTER COLUMN price TYPE DOUBLE PRECISION
+  USING price::DOUBLE PRECISION;
 
 CREATE TABLE IF NOT EXISTS strategy_backtests (
   id TEXT PRIMARY KEY,
