@@ -140,6 +140,11 @@ CREATE TABLE IF NOT EXISTS fund_capital (
   created_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
 );
 
+-- Drop strategy tables to fix schema mismatches (id column type)
+DROP TABLE IF EXISTS strategy_trades CASCADE;
+DROP TABLE IF EXISTS custom_strategies CASCADE;
+DROP TABLE IF EXISTS strategies CASCADE;
+
 CREATE TABLE IF NOT EXISTS strategies (
   id TEXT PRIMARY KEY,
   fund_id TEXT NOT NULL REFERENCES funds(id),

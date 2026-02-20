@@ -900,13 +900,51 @@ const Funds = {
               <div class="form-group">
                 <label>Target Ticker</label>
                 <select id="strategy-ticker">
-                  <option value="AAPL">AAPL - Apple</option>
-                  <option value="GOOGL">GOOGL - Google</option>
-                  <option value="MSFT">MSFT - Microsoft</option>
-                  <option value="TSLA">TSLA - Tesla</option>
-                  <option value="AMZN">AMZN - Amazon</option>
-                  <option value="BTC">BTC - Bitcoin</option>
-                  <option value="ETH">ETH - Ethereum</option>
+                  <optgroup label="Stocks — Large Cap">
+                    <option value="AAPL">AAPL — Apricot Corp</option>
+                    <option value="MSFT">MSFT — MegaSoft</option>
+                    <option value="NVDA">NVDA — NeuraVolt</option>
+                    <option value="AMZN">AMZN — AmazoNet</option>
+                    <option value="GOOG">GOOG — GooglTech</option>
+                    <option value="META">META — MetaVerse Inc</option>
+                    <option value="TSLA">TSLA — VoltMotors</option>
+                  </optgroup>
+                  <optgroup label="Stocks — Growth / Speculative">
+                    <option value="MOON">MOON — LunarTech</option>
+                    <option value="BIOT">BIOT — BioTera</option>
+                    <option value="QNTM">QNTM — QuantumLeap</option>
+                  </optgroup>
+                  <optgroup label="Commodities">
+                    <option value="OGLD">OGLD — OmniGold</option>
+                    <option value="SLVR">SLVR — SilverEdge</option>
+                    <option value="CRUD">CRUD — CrudeFlow</option>
+                    <option value="NATG">NATG — NatGas Plus</option>
+                    <option value="COPR">COPR — CopperLine</option>
+                  </optgroup>
+                  <optgroup label="Futures / Indices">
+                    <option value="SPXF">SPXF — S&P Futures</option>
+                    <option value="NQFT">NQFT — NQ Futures</option>
+                    <option value="DOWF">DOWF — Dow Futures</option>
+                    <option value="VIXF">VIXF — Fear Index</option>
+                  </optgroup>
+                  <optgroup label="ETFs">
+                    <option value="SAFE">SAFE — Treasury ETF</option>
+                    <option value="BNKX">BNKX — BankEx ETF</option>
+                    <option value="NRGY">NRGY — Energy ETF</option>
+                    <option value="MEDS">MEDS — HealthCare ETF</option>
+                    <option value="SEMX">SEMX — SemiConductor ETF</option>
+                    <option value="REIT">REIT — RealtyFund ETF</option>
+                  </optgroup>
+                  <optgroup label="Crypto">
+                    <option value="BTCX">BTCX — Bitcoin Index</option>
+                    <option value="ETHX">ETHX — Ethereum Index</option>
+                    <option value="SOLX">SOLX — Solana Index</option>
+                  </optgroup>
+                  <optgroup label="Forex">
+                    <option value="EURUSD">EURUSD — Euro/Dollar</option>
+                    <option value="GBPUSD">GBPUSD — Pound/Dollar</option>
+                    <option value="USDJPY">USDJPY — Dollar/Yen</option>
+                  </optgroup>
                 </select>
               </div>
             </div>
