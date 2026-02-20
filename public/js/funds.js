@@ -636,6 +636,13 @@ const Funds = {
     const typeInfo = this.STRATEGY_TYPES[strategy.type] || { name: strategy.type, icon: '📈' };
     const statusClass = strategy.is_active ? 'status-active' : 'status-stopped';
     const statusText = strategy.is_active ? 'Active' : 'Stopped';
+    const latestBacktest = !isCustom ? strategy.latest_backtest : null;
+    const backtestBadge = !isCustom
+      ? this.renderBacktestBadge(latestBacktest)
+      : '';
+    const backtestSummary = (!isCustom && latestBacktest?.metrics)
+      ? `<span>BT: ${latestBacktest.passed ? 'PASS' : 'FAIL'} · Trades ${latestBacktest.metrics.totalTrades || 0} · Win ${Utils.num(latestBacktest.metrics.winRate || 0, 1)}% · DD ${Utils.num(latestBacktest.metrics.maxDrawdownPct || 0, 1)}%</span>`
+      : (!isCustom ? '<span>BT: Not run</span>' : '');
 
     return `
       <div class="strategy-card ${strategy.is_active ? '' : 'inactive'}">
@@ -647,13 +654,18 @@ const Funds = {
         <div class="strategy-type">${isCustom ? 'Custom Code' : typeInfo.name}</div>
         <div class="strategy-meta">
           <span>Created: ${Utils.formatDate(strategy.created_at)}</span>
+          ${backtestSummary}
         </div>
+        ${backtestBadge}
         <div class="strategy-actions">
           ${strategy.is_active ? `
           <button class="action-btn" onclick="Funds.stopStrategy('${strategy.id}', ${isCustom})">Stop</button>
           ` : `
           <button class="action-btn success" onclick="Funds.startStrategy('${strategy.id}', ${isCustom})">Start</button>
           `}
+          ${!isCustom ? `
+          <button class="action-btn" onclick="Funds.backtestStrategy('${strategy.id}')">Backtest</button>
+          ` : ''}
           ${isCustom ? `
           <button class="action-btn" onclick="Funds.viewCustomStrategy('${strategy.id}')">View Code</button>
           ` : ''}
@@ -662,6 +674,16 @@ const Funds = {
         </div>
       </div>
     `;
+  },
+
+  renderBacktestBadge(backtest) {
+    if (!backtest) {
+      return `<div class="strategy-backtest-badge backtest-missing">Backtest required</div>`;
+    }
+    const cls = backtest.passed ? 'backtest-pass' : 'backtest-fail';
+    const label = backtest.passed ? 'Backtest PASS' : 'Backtest FAIL';
+    const ranAt = backtest.ran_at ? Utils.timeAgo(backtest.ran_at) : 'unknown';
+    return `<div class="strategy-backtest-badge ${cls}">${label} · ${ranAt}</div>`;
   },
 
   // ─── Data Loading ────────────────────────────────────────────────────────────
@@ -1377,7 +1399,7 @@ const Funds = {
         });
       }
 
-      Utils.showToast('info', 'Strategy Created', `"${name}" has been created`);
+      Utils.showToast('info', 'Strategy Created', `"${name}" created. Run backtest, then start.`);
       document.getElementById('create-strategy-modal')?.remove();
 
       // Refresh strategies
@@ -1492,7 +1514,11 @@ const Funds = {
 
   async startStrategy(strategyId, isCustom) {
     try {
-      await Utils.post('/strategies/' + strategyId + '/start');
+      if (isCustom) {
+        await Utils.put('/custom-strategies/' + strategyId, { is_active: true });
+      } else {
+        await Utils.post('/strategies/' + strategyId + '/start');
+      }
       Utils.showToast('info', 'Strategy Started', 'Strategy is now active');
 
       await this.refreshStrategies();
@@ -1501,9 +1527,31 @@ const Funds = {
     }
   },
 
+  async backtestStrategy(strategyId) {
+    try {
+      const result = await Utils.post('/strategies/' + strategyId + '/backtest', {});
+      const bt = result?.backtest;
+      const summary = bt?.metrics
+        ? `Trades ${bt.metrics.totalTrades || 0}, Win ${Utils.num(bt.metrics.winRate || 0, 1)}%, DD ${Utils.num(bt.metrics.maxDrawdownPct || 0, 1)}%, Sharpe ${Utils.num(bt.metrics.sharpe || 0, 2)}`
+        : 'Backtest completed';
+      Utils.showToast(
+        bt?.passed ? 'info' : 'error',
+        bt?.passed ? 'Backtest Passed' : 'Backtest Failed',
+        summary
+      );
+      await this.refreshStrategies();
+    } catch (e) {
+      Utils.showToast('error', 'Backtest Failed', e.message);
+    }
+  },
+
   async stopStrategy(strategyId, isCustom) {
     try {
-      await Utils.post('/strategies/' + strategyId + '/stop');
+      if (isCustom) {
+        await Utils.put('/custom-strategies/' + strategyId, { is_active: false });
+      } else {
+        await Utils.post('/strategies/' + strategyId + '/stop');
+      }
       Utils.showToast('info', 'Strategy Stopped', 'Strategy has been stopped');
 
       await this.refreshStrategies();
@@ -1516,7 +1564,11 @@ const Funds = {
     if (!confirm('Are you sure you want to delete this strategy?')) return;
 
     try {
-      await Utils.del('/strategies/' + strategyId);
+      if (isCustom) {
+        await Utils.del('/custom-strategies/' + strategyId);
+      } else {
+        await Utils.del('/strategies/' + strategyId);
+      }
       Utils.showToast('info', 'Strategy Deleted', 'Strategy has been removed');
 
       await this.refreshStrategies();

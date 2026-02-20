@@ -5,6 +5,7 @@ const { register, login, authenticate } = require('./auth');
 const engine = require('./engine');
 const orderbook = require('./orderbook');
 const strategyRunner = require('./strategyRunner');
+const backtester = require('./backtester');
 
 const router = express.Router();
 const MAX_ORDER_NOTIONAL_FRACTION = Math.max(0.05, Math.min(1, Number.parseFloat(process.env.MAX_ORDER_NOTIONAL_FRACTION || '0.35')));
@@ -452,6 +453,29 @@ function normalizeRiskSettingsPayload(payload, currentSettings) {
     };
 }
 
+function summarizeBacktestRecord(row) {
+    if (!row) return null;
+    let metrics = row.metrics || {};
+    let thresholds = row.thresholds || {};
+    if (typeof metrics === 'string') {
+        try { metrics = JSON.parse(metrics || '{}'); } catch { metrics = {}; }
+    }
+    if (typeof thresholds === 'string') {
+        try { thresholds = JSON.parse(thresholds || '{}'); } catch { thresholds = {}; }
+    }
+    return {
+        id: row.id,
+        strategy_id: row.strategy_id,
+        fund_id: row.fund_id,
+        config_hash: row.config_hash,
+        passed: Boolean(row.passed),
+        notes: row.notes || '',
+        ran_at: Number(row.ran_at),
+        metrics,
+        thresholds,
+    };
+}
+
 function toNum(value, fallback = 0) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
@@ -583,6 +607,7 @@ router.delete('/funds/:id', authenticate, requireFundOwner, asyncRoute(async (re
     }
 
     // Delete capital, members, then the fund
+    await stmts.deleteFundStrategyBacktests.run(fundId);
     await stmts.deleteFundNavSnapshots.run(fundId);
     await stmts.deleteFundRiskBreaches.run(fundId);
     await stmts.deleteFundRiskSettings.run(fundId);
@@ -1008,7 +1033,14 @@ router.get('/funds/:fundId/strategies', authenticate, asyncRoute(async (req, res
         return res.status(403).json({ error: 'Not a member of this fund' });
     }
     const strategies = await stmts.getStrategiesByFund.all(fundId);
-    res.json(strategies);
+    const enriched = await Promise.all(strategies.map(async (strategy) => {
+        const latest = await stmts.getLatestStrategyBacktest.get(strategy.id);
+        return {
+            ...strategy,
+            latest_backtest: summarizeBacktestRecord(latest),
+        };
+    }));
+    res.json(enriched);
 }));
 
 // Create a new strategy (fund members only)
@@ -1039,7 +1071,7 @@ router.post('/funds/:fundId/strategies', authenticate, asyncRoute(async (req, re
         name,
         type,
         JSON.stringify(config || {}),
-        true,
+        false,
         now,
         now
     );
@@ -1060,7 +1092,11 @@ router.get('/strategies/:id', authenticate, asyncRoute(async (req, res) => {
         return res.status(403).json({ error: 'Not a member of this fund' });
     }
 
-    res.json(strategy);
+    const latest = await stmts.getLatestStrategyBacktest.get(strategy.id);
+    res.json({
+        ...strategy,
+        latest_backtest: summarizeBacktestRecord(latest),
+    });
 }));
 
 // Fund dashboard — live PnL, trades, positions, signals
@@ -1091,6 +1127,64 @@ router.get('/strategies/:id/trades', authenticate, asyncRoute(async (req, res) =
 
     const trades = await stmts.getStrategyTrades.all(strategy.id, 100);
     res.json(trades);
+}));
+
+// Run strategy backtest (fund members only)
+router.post('/strategies/:id/backtest', authenticate, asyncRoute(async (req, res) => {
+    const strategy = await stmts.getStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    const bars = Math.min(Math.max(Number.parseInt(req.body?.bars, 10) || 500, 100), 2000);
+    const thresholds = req.body?.thresholds || {};
+
+    let result;
+    try {
+        result = await backtester.runStrategyBacktest(strategy, { bars, thresholds });
+    } catch (error) {
+        return res.status(400).json({ error: error.message || 'Backtest failed' });
+    }
+    const rowId = uuid();
+    const now = Date.now();
+
+    await stmts.insertStrategyBacktest.run(
+        rowId,
+        strategy.id,
+        strategy.fund_id,
+        result.configHash,
+        JSON.stringify(result.configSnapshot || {}),
+        JSON.stringify(result.metrics || {}),
+        JSON.stringify(result.thresholds || {}),
+        result.passed,
+        result.notes,
+        now
+    );
+
+    const saved = await stmts.getLatestStrategyBacktest.get(strategy.id);
+    res.status(201).json({ success: true, backtest: summarizeBacktestRecord(saved), failures: result.failures || [] });
+}));
+
+// List backtests for a strategy (fund members only)
+router.get('/strategies/:id/backtests', authenticate, asyncRoute(async (req, res) => {
+    const strategy = await stmts.getStrategyById.get(req.params.id);
+    if (!strategy) {
+        return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
+    if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this fund' });
+    }
+
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 20, 1), 200);
+    const rows = await stmts.getStrategyBacktests.all(strategy.id, limit);
+    res.json(rows.map((row) => summarizeBacktestRecord(row)));
 }));
 
 // Update a strategy (fund members only)
@@ -1140,6 +1234,7 @@ router.delete('/strategies/:id', authenticate, asyncRoute(async (req, res) => {
         return res.status(403).json({ error: 'Not a member of this fund' });
     }
 
+    await stmts.deleteStrategyBacktests.run(req.params.id);
     await stmts.deleteStrategy.run(req.params.id);
     res.json({ success: true });
 }));
@@ -1158,6 +1253,24 @@ router.post('/strategies/:id/start', authenticate, asyncRoute(async (req, res) =
 
     if (strategy.is_active) {
         return res.status(400).json({ error: 'Strategy is already active' });
+    }
+
+    if (strategy.type !== 'custom') {
+        const latest = await stmts.getLatestStrategyBacktest.get(strategy.id);
+        if (!latest) {
+            return res.status(400).json({ error: 'Backtest required before deploy. Run a backtest first.' });
+        }
+
+        const latestSummary = summarizeBacktestRecord(latest);
+        if (!latestSummary.passed) {
+            return res.status(400).json({ error: `Deploy blocked: latest backtest failed gate (${latestSummary.notes || 'thresholds not met'}).` });
+        }
+
+        const config = backtester.normalizeStrategyConfig(strategy);
+        const currentHash = backtester.computeConfigHash(config);
+        if (latestSummary.config_hash !== currentHash) {
+            return res.status(400).json({ error: 'Deploy blocked: strategy config changed since last passing backtest. Re-run backtest.' });
+        }
     }
 
     const now = Date.now();

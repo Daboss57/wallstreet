@@ -219,6 +219,19 @@ CREATE TABLE IF NOT EXISTS strategy_trades (
   executed_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
 );
 
+CREATE TABLE IF NOT EXISTS strategy_backtests (
+  id TEXT PRIMARY KEY,
+  strategy_id TEXT NOT NULL,
+  fund_id TEXT NOT NULL,
+  config_hash TEXT NOT NULL,
+  config_snapshot JSONB NOT NULL DEFAULT '{}',
+  metrics JSONB NOT NULL DEFAULT '{}',
+  thresholds JSONB NOT NULL DEFAULT '{}',
+  passed BOOLEAN NOT NULL DEFAULT false,
+  notes TEXT,
+  ran_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
+);
+
 CREATE INDEX IF NOT EXISTS idx_positions_user ON positions(user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_ticker_status ON orders(ticker, status);
@@ -239,6 +252,8 @@ CREATE INDEX IF NOT EXISTS idx_custom_strategies_fund ON custom_strategies(fund_
 CREATE INDEX IF NOT EXISTS idx_custom_strategies_active ON custom_strategies(is_active);
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_strategy ON strategy_trades(strategy_id);
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_ticker ON strategy_trades(ticker);
+CREATE INDEX IF NOT EXISTS idx_strategy_backtests_strategy_time ON strategy_backtests(strategy_id, ran_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_backtests_fund_time ON strategy_backtests(fund_id, ran_at DESC);
 `;
 
 const SQL = {
@@ -397,6 +412,14 @@ const SQL = {
     getStrategyTrades: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 ORDER BY executed_at DESC LIMIT $2',
     getStrategyTradesByTicker: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 AND ticker = $2 ORDER BY executed_at DESC',
     deleteStrategyTrades: 'DELETE FROM strategy_trades WHERE strategy_id = $1',
+    insertStrategyBacktest: `
+        INSERT INTO strategy_backtests (id, strategy_id, fund_id, config_hash, config_snapshot, metrics, thresholds, passed, notes, ran_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    `,
+    getStrategyBacktests: 'SELECT * FROM strategy_backtests WHERE strategy_id = $1 ORDER BY ran_at DESC LIMIT $2',
+    getLatestStrategyBacktest: 'SELECT * FROM strategy_backtests WHERE strategy_id = $1 ORDER BY ran_at DESC LIMIT 1',
+    deleteStrategyBacktests: 'DELETE FROM strategy_backtests WHERE strategy_id = $1',
+    deleteFundStrategyBacktests: 'DELETE FROM strategy_backtests WHERE fund_id = $1',
 
     // Custom Strategy CRUD
     insertCustomStrategy: 'INSERT INTO custom_strategies (id, fund_id, name, code, parameters, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
@@ -543,6 +566,11 @@ const stmts = {
     getStrategyTrades: makeStatement('getStrategyTrades', SQL.getStrategyTrades),
     getStrategyTradesByTicker: makeStatement('getStrategyTradesByTicker', SQL.getStrategyTradesByTicker),
     deleteStrategyTrades: makeStatement('deleteStrategyTrades', SQL.deleteStrategyTrades),
+    insertStrategyBacktest: makeStatement('insertStrategyBacktest', SQL.insertStrategyBacktest),
+    getStrategyBacktests: makeStatement('getStrategyBacktests', SQL.getStrategyBacktests),
+    getLatestStrategyBacktest: makeStatement('getLatestStrategyBacktest', SQL.getLatestStrategyBacktest),
+    deleteStrategyBacktests: makeStatement('deleteStrategyBacktests', SQL.deleteStrategyBacktests),
+    deleteFundStrategyBacktests: makeStatement('deleteFundStrategyBacktests', SQL.deleteFundStrategyBacktests),
 
     // Custom Strategy CRUD
     insertCustomStrategy: makeStatement('insertCustomStrategy', SQL.insertCustomStrategy),
