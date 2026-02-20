@@ -131,7 +131,7 @@ router.get('/candles/:ticker/preview', authenticate, asyncRoute(async (req, res)
         interval,
         minutes,
         candles,
-        mode: 'simulated_projection',
+        mode: 'queued_live_path',
     });
 }));
 

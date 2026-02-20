@@ -164,7 +164,7 @@ const Terminal = {
           </div>
         </div>
         <div class="chart-timeframes" id="chart-timeframes">
-          <button id="future-preview-toggle" class="future-preview-toggle ${this._futurePreviewEnabled ? 'active' : ''}" type="button" title="Simulated preview up to 5 minutes ahead">Future +5m</button>
+          <button id="future-preview-toggle" class="future-preview-toggle ${this._futurePreviewEnabled ? 'active' : ''}" type="button" title="Queued live candles up to 5 minutes ahead">Future +5m</button>
           <button class="active" data-interval="1m">1m</button>
           <button data-interval="5m">5m</button>
           <button data-interval="15m">15m</button>
@@ -530,7 +530,7 @@ const Terminal = {
       await ChartManager.setFuturePreview(nextEnabled);
       this._futurePreviewEnabled = nextEnabled;
       if (nextEnabled) {
-        Utils.showToast('info', 'Future Preview', 'Showing simulated candles up to 5 minutes ahead.');
+        Utils.showToast('info', 'Future Preview', 'Showing queued live candles up to 5 minutes ahead.');
       }
     } catch (e) {
       this._futurePreviewEnabled = false;
@@ -560,7 +560,7 @@ const Terminal = {
 
     button.disabled = false;
     button.textContent = this._futurePreviewEnabled ? 'Future +5m ON' : 'Future +5m';
-    button.title = 'Simulated preview up to 5 minutes ahead';
+    button.title = 'Queued live candles up to 5 minutes ahead';
   },
 
   selectTicker(ticker) {
