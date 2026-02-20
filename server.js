@@ -180,7 +180,11 @@ async function bootstrap() {
         console.error('[Server] Engine startup failed:', error.message);
     }
     news.start();
-    strategyRunner.start();
+    try {
+        await strategyRunner.start();
+    } catch (error) {
+        console.error('[Server] Strategy runner startup failed:', error.message);
+    }
 
     await monitorDbHealth();
 

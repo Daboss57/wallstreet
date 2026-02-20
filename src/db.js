@@ -404,6 +404,7 @@ const SQL = {
     // Strategy CRUD
     insertStrategy: 'INSERT INTO strategies (id, fund_id, name, type, config, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
     getStrategyById: 'SELECT * FROM strategies WHERE id = $1',
+    getAllStrategies: 'SELECT * FROM strategies',
     getStrategiesByFund: 'SELECT * FROM strategies WHERE fund_id = $1 ORDER BY created_at DESC',
     getActiveStrategies: 'SELECT * FROM strategies WHERE is_active = true ORDER BY created_at DESC',
     getActiveStrategiesAll: 'SELECT * FROM strategies WHERE is_active = true',
@@ -412,6 +413,7 @@ const SQL = {
 
     // Strategy Trade CRUD
     insertStrategyTrade: 'INSERT INTO strategy_trades (id, strategy_id, ticker, side, quantity, price, executed_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+    getAllStrategyTradesChrono: 'SELECT * FROM strategy_trades ORDER BY executed_at ASC, id ASC',
     getStrategyTrades: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 ORDER BY executed_at DESC LIMIT $2',
     getStrategyTradesByTicker: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 AND ticker = $2 ORDER BY executed_at DESC',
     deleteStrategyTrades: 'DELETE FROM strategy_trades WHERE strategy_id = $1',
@@ -558,6 +560,7 @@ const stmts = {
     // Strategy CRUD
     insertStrategy: makeStatement('insertStrategy', SQL.insertStrategy),
     getStrategyById: makeStatement('getStrategyById', SQL.getStrategyById),
+    getAllStrategies: makeStatement('getAllStrategies', SQL.getAllStrategies),
     getStrategiesByFund: makeStatement('getStrategiesByFund', SQL.getStrategiesByFund),
     getActiveStrategies: makeStatement('getActiveStrategies', SQL.getActiveStrategies),
     getActiveStrategiesAll: makeStatement('getActiveStrategiesAll', SQL.getActiveStrategiesAll),
@@ -566,6 +569,7 @@ const stmts = {
 
     // Strategy Trade CRUD
     insertStrategyTrade: makeStatement('insertStrategyTrade', SQL.insertStrategyTrade),
+    getAllStrategyTradesChrono: makeStatement('getAllStrategyTradesChrono', SQL.getAllStrategyTradesChrono),
     getStrategyTrades: makeStatement('getStrategyTrades', SQL.getStrategyTrades),
     getStrategyTradesByTicker: makeStatement('getStrategyTradesByTicker', SQL.getStrategyTradesByTicker),
     deleteStrategyTrades: makeStatement('deleteStrategyTrades', SQL.deleteStrategyTrades),

@@ -361,6 +361,66 @@ function getOrCreateState(strategyId) {
     return strategyStates.get(strategyId);
 }
 
+function resetRuntimeState() {
+    strategyStates.clear();
+    strategyFundMap.clear();
+    fundRiskDayState.clear();
+    lastRunAt = 0;
+    totalRuns = 0;
+}
+
+async function hydrateStateFromDb() {
+    resetRuntimeState();
+
+    const [strategies, trades] = await Promise.all([
+        stmts.getAllStrategies.all(),
+        stmts.getAllStrategyTradesChrono.all(),
+    ]);
+
+    const strategyById = new Map();
+    for (const strategy of strategies || []) {
+        strategyById.set(strategy.id, strategy);
+        strategyFundMap.set(strategy.id, strategy.fund_id);
+        getOrCreateState(strategy.id);
+    }
+
+    let restoredTrades = 0;
+    for (const row of trades || []) {
+        const strategy = strategyById.get(row.strategy_id);
+        if (!strategy) continue;
+
+        const side = String(row.side || '').toLowerCase();
+        const qty = Number(row.quantity || 0);
+        const price = Number(row.price || 0);
+        const executedAt = Number(row.executed_at || 0);
+        if (!['buy', 'sell'].includes(side)) continue;
+        if (!Number.isFinite(qty) || qty <= 0) continue;
+        if (!Number.isFinite(price) || price <= 0) continue;
+
+        const state = getOrCreateState(row.strategy_id);
+        updatePosition(state, row.ticker, side, qty, price);
+        state.tradeCount += 1;
+        state.lastSignal = side;
+        state.lastRunAt = Math.max(Number(state.lastRunAt || 0), executedAt || 0);
+
+        state.trades.push({
+            id: row.id,
+            ticker: row.ticker,
+            side,
+            quantity: qty,
+            price,
+            executed_at: executedAt || Date.now(),
+            strategy_name: strategy.name,
+        });
+        if (state.trades.length > MAX_MEMORY_TRADES) state.trades.shift();
+        restoredTrades += 1;
+    }
+
+    console.log(
+        `[StrategyRunner] Hydrated ${strategyById.size} strategies and ${restoredTrades} strategy trades from DB`
+    );
+}
+
 // ─── Execute a single strategy ──────────────────────────────────────────────
 async function executeStrategy(strategy) {
     strategyFundMap.set(strategy.id, strategy.fund_id);
@@ -575,8 +635,15 @@ async function runAll() {
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
-function start() {
+async function start() {
     if (runnerInterval) return;
+    try {
+        await hydrateStateFromDb();
+    } catch (err) {
+        if (!isDbUnavailableError(err)) {
+            console.error('[StrategyRunner] Hydration failed:', err.message);
+        }
+    }
     runnerInterval = setInterval(runAll, RUN_INTERVAL_MS);
     console.log(`[StrategyRunner] Running — ${RUN_INTERVAL_MS / 1000}s interval`);
     // First run after a short delay to let engine populate candles
