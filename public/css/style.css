@@ -2570,6 +2570,48 @@ select {
   margin-bottom: 24px;
 }
 
+.capital-summary.capital-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+/* Risk Section */
+.risk-section {
+  padding: 0;
+}
+
+.risk-overview-grid,
+.risk-limit-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.risk-limit-grid input[type="number"] {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+
+.risk-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+
+.risk-actions {
+  margin-bottom: 8px;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════════
    STRATEGIES
    ═══════════════════════════════════════════════════════════════════════════════ */
@@ -2776,6 +2818,15 @@ select {
     grid-template-columns: repeat(2, 1fr);
   }
 
+  .risk-overview-grid,
+  .risk-limit-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .capital-summary.capital-summary-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
   .form-row {
     grid-template-columns: 1fr;
   }
@@ -2788,7 +2839,10 @@ select {
 @media (max-width: 600px) {
 
   .overview-grid,
-  .overview-stats {
+  .overview-stats,
+  .capital-summary.capital-summary-grid,
+  .risk-overview-grid,
+  .risk-limit-grid {
     grid-template-columns: 1fr;
   }
 

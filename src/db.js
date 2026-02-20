@@ -140,10 +140,52 @@ CREATE TABLE IF NOT EXISTS fund_capital (
   created_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
 );
 
--- Drop strategy tables to fix schema mismatches (id column type)
-DROP TABLE IF EXISTS strategy_trades CASCADE;
-DROP TABLE IF EXISTS custom_strategies CASCADE;
-DROP TABLE IF EXISTS strategies CASCADE;
+ALTER TABLE fund_capital ADD COLUMN IF NOT EXISTS units_delta DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE fund_capital ADD COLUMN IF NOT EXISTS nav_per_unit DOUBLE PRECISION;
+ALTER TABLE fund_capital ADD COLUMN IF NOT EXISTS nav_before DOUBLE PRECISION;
+ALTER TABLE fund_capital ADD COLUMN IF NOT EXISTS nav_after DOUBLE PRECISION;
+UPDATE fund_capital
+SET units_delta = CASE WHEN type = 'deposit' THEN amount ELSE -amount END
+WHERE units_delta = 0 AND amount <> 0;
+UPDATE fund_capital
+SET nav_per_unit = 1
+WHERE nav_per_unit IS NULL;
+
+CREATE TABLE IF NOT EXISTS fund_nav_snapshots (
+  id BIGSERIAL PRIMARY KEY,
+  fund_id TEXT NOT NULL REFERENCES funds(id),
+  nav DOUBLE PRECISION NOT NULL,
+  nav_per_unit DOUBLE PRECISION NOT NULL,
+  total_units DOUBLE PRECISION NOT NULL,
+  capital DOUBLE PRECISION NOT NULL,
+  pnl DOUBLE PRECISION NOT NULL DEFAULT 0,
+  snapshot_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
+);
+
+CREATE TABLE IF NOT EXISTS fund_risk_settings (
+  fund_id TEXT PRIMARY KEY REFERENCES funds(id),
+  max_position_pct DOUBLE PRECISION NOT NULL DEFAULT 25,
+  max_strategy_allocation_pct DOUBLE PRECISION NOT NULL DEFAULT 50,
+  max_daily_drawdown_pct DOUBLE PRECISION NOT NULL DEFAULT 8,
+  is_enabled BOOLEAN NOT NULL DEFAULT true,
+  updated_by TEXT REFERENCES users(id),
+  updated_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
+);
+
+CREATE TABLE IF NOT EXISTS fund_risk_breaches (
+  id TEXT PRIMARY KEY,
+  fund_id TEXT NOT NULL REFERENCES funds(id),
+  strategy_id TEXT,
+  rule TEXT NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'error',
+  message TEXT NOT NULL,
+  context JSONB NOT NULL DEFAULT '{}',
+  blocked_trade JSONB NOT NULL DEFAULT '{}',
+  created_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
+);
+
+-- NOTE: Do not drop strategy tables during startup.
+-- Startup schema sync must be non-destructive so user-created fund strategies persist.
 
 CREATE TABLE IF NOT EXISTS strategies (
   id TEXT PRIMARY KEY,
@@ -189,6 +231,8 @@ CREATE INDEX IF NOT EXISTS idx_fund_members_fund ON fund_members(fund_id);
 CREATE INDEX IF NOT EXISTS idx_fund_members_user ON fund_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_fund_capital_fund ON fund_capital(fund_id);
 CREATE INDEX IF NOT EXISTS idx_fund_capital_user ON fund_capital(user_id, fund_id);
+CREATE INDEX IF NOT EXISTS idx_fund_nav_snapshots_fund_time ON fund_nav_snapshots(fund_id, snapshot_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fund_risk_breaches_fund_created ON fund_risk_breaches(fund_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_strategies_fund ON strategies(fund_id);
 CREATE INDEX IF NOT EXISTS idx_strategies_type ON strategies(type);
 CREATE INDEX IF NOT EXISTS idx_custom_strategies_fund ON custom_strategies(fund_id);
@@ -296,7 +340,48 @@ const SQL = {
     getFundCapitalTransactions: 'SELECT fc.*, u.username FROM fund_capital fc JOIN users u ON fc.user_id = u.id WHERE fc.fund_id = $1 ORDER BY fc.created_at DESC',
     getUserCapitalInFund: 'SELECT * FROM fund_capital WHERE fund_id = $1 AND user_id = $2 ORDER BY created_at DESC',
     getFundCapitalSummary: 'SELECT user_id, SUM(CASE WHEN type = $2 THEN amount ELSE -amount END) as total_capital FROM fund_capital WHERE fund_id = $1 GROUP BY user_id',
+    getFundNetCapital: "SELECT COALESCE(SUM(CASE WHEN type = 'deposit' THEN amount ELSE -amount END), 0) as net_capital FROM fund_capital WHERE fund_id = $1",
+    getFundTotalUnits: 'SELECT COALESCE(SUM(units_delta), 0) as total_units FROM fund_capital WHERE fund_id = $1',
+    getUserFundUnits: 'SELECT COALESCE(SUM(units_delta), 0) as total_units FROM fund_capital WHERE fund_id = $1 AND user_id = $2',
+    getUserFundNetCapital: "SELECT COALESCE(SUM(CASE WHEN type = 'deposit' THEN amount ELSE -amount END), 0) as net_capital FROM fund_capital WHERE fund_id = $1 AND user_id = $2",
+    getFundInvestorLedger: `
+        SELECT
+            fc.user_id,
+            u.username,
+            COALESCE(SUM(fc.units_delta), 0) as units,
+            COALESCE(SUM(CASE WHEN fc.type = 'deposit' THEN fc.amount ELSE -fc.amount END), 0) as net_capital
+        FROM fund_capital fc
+        JOIN users u ON u.id = fc.user_id
+        WHERE fc.fund_id = $1
+        GROUP BY fc.user_id, u.username
+        HAVING ABS(COALESCE(SUM(fc.units_delta), 0)) > 0.0000001
+        ORDER BY units DESC
+    `,
     deleteFundCapital: 'DELETE FROM fund_capital WHERE fund_id = $1',
+    insertFundNavSnapshot: 'INSERT INTO fund_nav_snapshots (fund_id, nav, nav_per_unit, total_units, capital, pnl, snapshot_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+    getFundNavSnapshots: 'SELECT * FROM fund_nav_snapshots WHERE fund_id = $1 ORDER BY snapshot_at DESC LIMIT $2',
+    deleteFundNavSnapshots: 'DELETE FROM fund_nav_snapshots WHERE fund_id = $1',
+
+    // Fund Risk CRUD
+    getFundRiskSettings: 'SELECT * FROM fund_risk_settings WHERE fund_id = $1',
+    upsertFundRiskSettings: `
+        INSERT INTO fund_risk_settings (fund_id, max_position_pct, max_strategy_allocation_pct, max_daily_drawdown_pct, is_enabled, updated_by, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT(fund_id) DO UPDATE SET
+            max_position_pct = EXCLUDED.max_position_pct,
+            max_strategy_allocation_pct = EXCLUDED.max_strategy_allocation_pct,
+            max_daily_drawdown_pct = EXCLUDED.max_daily_drawdown_pct,
+            is_enabled = EXCLUDED.is_enabled,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = EXCLUDED.updated_at
+    `,
+    insertFundRiskBreach: `
+        INSERT INTO fund_risk_breaches (id, fund_id, strategy_id, rule, severity, message, context, blocked_trade, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `,
+    getFundRiskBreaches: 'SELECT * FROM fund_risk_breaches WHERE fund_id = $1 ORDER BY created_at DESC LIMIT $2',
+    deleteFundRiskSettings: 'DELETE FROM fund_risk_settings WHERE fund_id = $1',
+    deleteFundRiskBreaches: 'DELETE FROM fund_risk_breaches WHERE fund_id = $1',
 
     // Strategy CRUD
     insertStrategy: 'INSERT INTO strategies (id, fund_id, name, type, config, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
@@ -426,7 +511,23 @@ const stmts = {
     getFundCapitalTransactions: makeStatement('getFundCapitalTransactions', SQL.getFundCapitalTransactions),
     getUserCapitalInFund: makeStatement('getUserCapitalInFund', SQL.getUserCapitalInFund),
     getFundCapitalSummary: makeStatement('getFundCapitalSummary', SQL.getFundCapitalSummary),
+    getFundNetCapital: makeStatement('getFundNetCapital', SQL.getFundNetCapital),
+    getFundTotalUnits: makeStatement('getFundTotalUnits', SQL.getFundTotalUnits),
+    getUserFundUnits: makeStatement('getUserFundUnits', SQL.getUserFundUnits),
+    getUserFundNetCapital: makeStatement('getUserFundNetCapital', SQL.getUserFundNetCapital),
+    getFundInvestorLedger: makeStatement('getFundInvestorLedger', SQL.getFundInvestorLedger),
     deleteFundCapital: makeStatement('deleteFundCapital', SQL.deleteFundCapital),
+    insertFundNavSnapshot: makeStatement('insertFundNavSnapshot', SQL.insertFundNavSnapshot),
+    getFundNavSnapshots: makeStatement('getFundNavSnapshots', SQL.getFundNavSnapshots),
+    deleteFundNavSnapshots: makeStatement('deleteFundNavSnapshots', SQL.deleteFundNavSnapshots),
+
+    // Fund Risk CRUD
+    getFundRiskSettings: makeStatement('getFundRiskSettings', SQL.getFundRiskSettings),
+    upsertFundRiskSettings: makeStatement('upsertFundRiskSettings', SQL.upsertFundRiskSettings),
+    insertFundRiskBreach: makeStatement('insertFundRiskBreach', SQL.insertFundRiskBreach),
+    getFundRiskBreaches: makeStatement('getFundRiskBreaches', SQL.getFundRiskBreaches),
+    deleteFundRiskSettings: makeStatement('deleteFundRiskSettings', SQL.deleteFundRiskSettings),
+    deleteFundRiskBreaches: makeStatement('deleteFundRiskBreaches', SQL.deleteFundRiskBreaches),
 
     // Strategy CRUD
     insertStrategy: makeStatement('insertStrategy', SQL.insertStrategy),

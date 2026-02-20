@@ -8,6 +8,8 @@ const pairsStrategy = require('./strategies/pairs');
 
 // ─── In-memory state ────────────────────────────────────────────────────────
 const strategyStates = new Map(); // strategyId → { trades, pnl, positions, signals }
+const strategyFundMap = new Map(); // strategyId -> fundId
+const fundRiskDayState = new Map(); // fundId -> { dateKey, peakEquity }
 let runnerInterval = null;
 let paused = false;
 let lastRunAt = 0;
@@ -15,6 +17,290 @@ let totalRuns = 0;
 
 const RUN_INTERVAL_MS = 30_000; // 30 seconds
 const MAX_MEMORY_TRADES = 200;  // per strategy
+const FUND_RISK_DEFAULTS = {
+    max_position_pct: 25,
+    max_strategy_allocation_pct: 50,
+    max_daily_drawdown_pct: 8,
+    is_enabled: true,
+};
+
+function clampNumber(value, fallback, min, max) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+}
+
+function normalizeRiskSettings(settings = {}) {
+    return {
+        max_position_pct: clampNumber(settings.max_position_pct, FUND_RISK_DEFAULTS.max_position_pct, 1, 100),
+        max_strategy_allocation_pct: clampNumber(settings.max_strategy_allocation_pct, FUND_RISK_DEFAULTS.max_strategy_allocation_pct, 1, 100),
+        max_daily_drawdown_pct: clampNumber(settings.max_daily_drawdown_pct, FUND_RISK_DEFAULTS.max_daily_drawdown_pct, 0.1, 100),
+        is_enabled: settings.is_enabled === undefined ? FUND_RISK_DEFAULTS.is_enabled : Boolean(settings.is_enabled),
+        updated_at: settings.updated_at || null,
+        updated_by: settings.updated_by || null,
+    };
+}
+
+async function getFundRiskSettings(fundId) {
+    const row = await stmts.getFundRiskSettings.get(fundId);
+    return normalizeRiskSettings(row || {});
+}
+
+function getDateKey(timestamp = Date.now()) {
+    const d = new Date(timestamp);
+    const year = d.getUTCFullYear();
+    const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function getExposureDelta(currentQty, side, qty, price) {
+    const current = Number(currentQty) || 0;
+    const tradeQty = Math.max(0, Number(qty) || 0);
+    if (tradeQty <= 0 || !Number.isFinite(price) || price <= 0) return 0;
+    const nextQty = side === 'buy' ? current + tradeQty : current - tradeQty;
+    return (Math.abs(nextQty) - Math.abs(current)) * price;
+}
+
+function getFundExposureSnapshot(fundId) {
+    let totalRealized = 0;
+    let totalUnrealized = 0;
+    let totalExposure = 0;
+    const tickerExposure = new Map();
+    const strategyExposure = new Map();
+
+    for (const [strategyId, state] of strategyStates.entries()) {
+        if (strategyFundMap.get(strategyId) !== fundId) continue;
+
+        let strategyNotional = 0;
+        let strategyUnrealized = 0;
+        for (const [ticker, pos] of Object.entries(state.positions || {})) {
+            if (!pos || !pos.qty) continue;
+            const currentPrice = Number(engine.getPrice(ticker)?.price || pos.avgEntry || 0);
+            if (!Number.isFinite(currentPrice) || currentPrice <= 0) continue;
+
+            const qty = Number(pos.qty) || 0;
+            if (qty === 0) continue;
+
+            const notional = Math.abs(qty) * currentPrice;
+            strategyNotional += notional;
+            totalExposure += notional;
+            tickerExposure.set(ticker, (tickerExposure.get(ticker) || 0) + notional);
+
+            const avgEntry = Number(pos.avgEntry) || 0;
+            if (qty > 0) {
+                strategyUnrealized += qty * (currentPrice - avgEntry);
+            } else {
+                strategyUnrealized += Math.abs(qty) * (avgEntry - currentPrice);
+            }
+        }
+
+        strategyExposure.set(strategyId, strategyNotional);
+        totalRealized += Number(state.realizedPnl || 0);
+        totalUnrealized += strategyUnrealized;
+    }
+
+    return {
+        totalExposure,
+        tickerExposure,
+        strategyExposure,
+        totalRealized,
+        totalUnrealized,
+        totalPnl: totalRealized + totalUnrealized,
+    };
+}
+
+function getDrawdownState(fundId, equity, timestamp = Date.now()) {
+    const dateKey = getDateKey(timestamp);
+    let dayState = fundRiskDayState.get(fundId);
+    if (!dayState || dayState.dateKey !== dateKey) {
+        dayState = { dateKey, peakEquity: equity };
+    } else if (equity > dayState.peakEquity) {
+        dayState.peakEquity = equity;
+    }
+    fundRiskDayState.set(fundId, dayState);
+
+    const drawdownPct = dayState.peakEquity > 0
+        ? Math.max(0, ((dayState.peakEquity - equity) / dayState.peakEquity) * 100)
+        : 0;
+
+    return {
+        dateKey,
+        peakEquity: dayState.peakEquity,
+        drawdownPct,
+    };
+}
+
+async function evaluateRiskGuards(strategy, state, side, ticker, qty, price) {
+    const settings = await getFundRiskSettings(strategy.fund_id);
+    if (!settings.is_enabled) return { allowed: true, settings };
+
+    const netCapitalRow = await stmts.getFundNetCapital.get(strategy.fund_id);
+    const fundCapital = Number(netCapitalRow?.net_capital || 0);
+    if (!Number.isFinite(fundCapital) || fundCapital <= 0) {
+        return {
+            allowed: false,
+            rule: 'fund_capital_required',
+            message: 'Risk guard blocked trade: fund has no net capital.',
+            context: { fundCapital, side, ticker, qty, price },
+            settings,
+        };
+    }
+
+    const snapshot = getFundExposureSnapshot(strategy.fund_id);
+    const currentTickerExposure = snapshot.tickerExposure.get(ticker) || 0;
+    const currentStrategyExposure = snapshot.strategyExposure.get(strategy.id) || 0;
+    const currentTickerQty = Number(state.positions?.[ticker]?.qty || 0);
+    const deltaExposure = getExposureDelta(currentTickerQty, side, qty, price);
+    const projectedTickerExposure = Math.max(0, currentTickerExposure + deltaExposure);
+    const projectedStrategyExposure = Math.max(0, currentStrategyExposure + deltaExposure);
+
+    const projectedTickerPct = (projectedTickerExposure / fundCapital) * 100;
+    if (projectedTickerPct > settings.max_position_pct + 1e-9) {
+        return {
+            allowed: false,
+            rule: 'max_position_pct',
+            message: `Risk guard blocked trade: projected ${ticker} exposure ${projectedTickerPct.toFixed(2)}% exceeds limit ${settings.max_position_pct.toFixed(2)}%.`,
+            context: {
+                fundCapital,
+                currentTickerExposure,
+                projectedTickerExposure,
+                projectedTickerPct,
+                limitPct: settings.max_position_pct,
+                deltaExposure,
+                side,
+                ticker,
+                qty,
+                price,
+            },
+            settings,
+        };
+    }
+
+    const projectedStrategyPct = (projectedStrategyExposure / fundCapital) * 100;
+    if (projectedStrategyPct > settings.max_strategy_allocation_pct + 1e-9) {
+        return {
+            allowed: false,
+            rule: 'max_strategy_allocation_pct',
+            message: `Risk guard blocked trade: projected strategy exposure ${projectedStrategyPct.toFixed(2)}% exceeds limit ${settings.max_strategy_allocation_pct.toFixed(2)}%.`,
+            context: {
+                fundCapital,
+                strategyId: strategy.id,
+                currentStrategyExposure,
+                projectedStrategyExposure,
+                projectedStrategyPct,
+                limitPct: settings.max_strategy_allocation_pct,
+                deltaExposure,
+                side,
+                ticker,
+                qty,
+                price,
+            },
+            settings,
+        };
+    }
+
+    const equity = fundCapital + snapshot.totalPnl;
+    const drawdown = getDrawdownState(strategy.fund_id, equity);
+    if (drawdown.drawdownPct > settings.max_daily_drawdown_pct + 1e-9) {
+        return {
+            allowed: false,
+            rule: 'max_daily_drawdown_pct',
+            message: `Risk guard blocked trade: current daily drawdown ${drawdown.drawdownPct.toFixed(2)}% exceeds limit ${settings.max_daily_drawdown_pct.toFixed(2)}%.`,
+            context: {
+                fundCapital,
+                equity,
+                peakEquity: drawdown.peakEquity,
+                drawdownPct: drawdown.drawdownPct,
+                limitPct: settings.max_daily_drawdown_pct,
+                side,
+                ticker,
+                qty,
+                price,
+            },
+            settings,
+        };
+    }
+
+    return { allowed: true, settings };
+}
+
+async function recordRiskBreach(strategy, state, ticker, side, qty, price, breach) {
+    const now = Date.now();
+    state.signals.unshift({
+        signal: 'blocked',
+        ticker,
+        reason: breach.message,
+        timestamp: now,
+        data: {
+            rule: breach.rule,
+            side,
+            qty,
+            price,
+            context: breach.context || {},
+        },
+    });
+    if (state.signals.length > 50) state.signals.length = 50;
+    state.lastSignal = 'blocked';
+    state.lastRunAt = now;
+
+    try {
+        await stmts.insertFundRiskBreach.run(
+            uuid(),
+            strategy.fund_id,
+            strategy.id,
+            breach.rule,
+            'error',
+            breach.message,
+            JSON.stringify(breach.context || {}),
+            JSON.stringify({ ticker, side, quantity: qty, price }),
+            now
+        );
+    } catch (err) {
+        if (!isDbUnavailableError(err)) {
+            console.error('[StrategyRunner] Risk breach log error:', err.message);
+        }
+    }
+}
+
+async function getFundRiskSnapshot(fundId) {
+    const settings = await getFundRiskSettings(fundId);
+    const netCapitalRow = await stmts.getFundNetCapital.get(fundId);
+    const fundCapital = Number(netCapitalRow?.net_capital || 0);
+    const exposure = getFundExposureSnapshot(fundId);
+    const equity = fundCapital + exposure.totalPnl;
+    const drawdown = getDrawdownState(fundId, equity);
+
+    const byTicker = Array.from(exposure.tickerExposure.entries())
+        .map(([ticker, value]) => ({
+            ticker,
+            exposure: +value.toFixed(2),
+            exposurePct: fundCapital > 0 ? +((value / fundCapital) * 100).toFixed(2) : 0,
+        }))
+        .sort((a, b) => b.exposure - a.exposure);
+
+    const byStrategy = Array.from(exposure.strategyExposure.entries())
+        .map(([strategyId, value]) => ({
+            strategyId,
+            exposure: +value.toFixed(2),
+            exposurePct: fundCapital > 0 ? +((value / fundCapital) * 100).toFixed(2) : 0,
+        }))
+        .sort((a, b) => b.exposure - a.exposure);
+
+    return {
+        settings,
+        capital: +fundCapital.toFixed(2),
+        equity: +equity.toFixed(2),
+        totalPnl: +exposure.totalPnl.toFixed(2),
+        totalExposure: +exposure.totalExposure.toFixed(2),
+        grossExposurePct: fundCapital > 0 ? +((exposure.totalExposure / fundCapital) * 100).toFixed(2) : 0,
+        dailyDrawdownPct: +drawdown.drawdownPct.toFixed(2),
+        dailyPeakEquity: +drawdown.peakEquity.toFixed(2),
+        dateKey: drawdown.dateKey,
+        byTicker,
+        byStrategy,
+    };
+}
 
 function getOrCreateState(strategyId) {
     if (!strategyStates.has(strategyId)) {
@@ -35,6 +321,7 @@ function getOrCreateState(strategyId) {
 
 // ─── Execute a single strategy ──────────────────────────────────────────────
 async function executeStrategy(strategy) {
+    strategyFundMap.set(strategy.id, strategy.fund_id);
     const config = typeof strategy.config === 'string'
         ? JSON.parse(strategy.config)
         : (strategy.config || {});
@@ -97,7 +384,8 @@ async function executeStrategy(strategy) {
     // Normalize signal
     const signal = (result.signal || result.action || 'hold').toLowerCase();
     const ticker = result.ticker || config.ticker;
-    const qty = result.positionSize || result.quantity || 10;
+    const qty = Math.round(Number(result.positionSize ?? result.quantity ?? 10));
+    if (!Number.isFinite(qty) || qty <= 0) return;
 
     // Record signal in activity log
     state.signals.unshift({
@@ -117,10 +405,22 @@ async function executeStrategy(strategy) {
     const priceData = engine.getPrice(ticker);
     if (!priceData) return;
 
-    const price = signal === 'buy' ? priceData.ask : priceData.bid;
+    const price = signal === 'buy' ? Number(priceData.ask) : Number(priceData.bid);
+    if (!Number.isFinite(price) || price <= 0) return;
     const side = signal;
     const now = Date.now();
     const tradeId = uuid();
+
+    try {
+        const riskCheck = await evaluateRiskGuards(strategy, state, side, ticker, qty, price);
+        if (!riskCheck.allowed) {
+            await recordRiskBreach(strategy, state, ticker, side, qty, price, riskCheck);
+            return;
+        }
+    } catch (err) {
+        console.error(`[StrategyRunner] Risk check failed for ${strategy.name}:`, err.message);
+        return;
+    }
 
     // Record to DB
     try {
@@ -352,4 +652,13 @@ function getDashboardData(fundId, strategies) {
     };
 }
 
-module.exports = { start, stop, setPaused, getDashboardData, runAll };
+module.exports = {
+    start,
+    stop,
+    setPaused,
+    getDashboardData,
+    getFundRiskSnapshot,
+    FUND_RISK_DEFAULTS,
+    normalizeRiskSettings,
+    runAll,
+};

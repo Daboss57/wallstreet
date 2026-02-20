@@ -421,6 +421,79 @@ function requireFundOwner(req, res, next) {
     })().catch(next);
 }
 
+function clampNumber(value, fallback, min, max) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+}
+
+function normalizeRiskSettingsPayload(payload, currentSettings) {
+    const base = currentSettings || strategyRunner.FUND_RISK_DEFAULTS;
+    return {
+        max_position_pct: clampNumber(
+            payload.max_position_pct !== undefined ? payload.max_position_pct : base.max_position_pct,
+            base.max_position_pct,
+            1,
+            100
+        ),
+        max_strategy_allocation_pct: clampNumber(
+            payload.max_strategy_allocation_pct !== undefined ? payload.max_strategy_allocation_pct : base.max_strategy_allocation_pct,
+            base.max_strategy_allocation_pct,
+            1,
+            100
+        ),
+        max_daily_drawdown_pct: clampNumber(
+            payload.max_daily_drawdown_pct !== undefined ? payload.max_daily_drawdown_pct : base.max_daily_drawdown_pct,
+            base.max_daily_drawdown_pct,
+            0.1,
+            100
+        ),
+        is_enabled: payload.is_enabled !== undefined ? Boolean(payload.is_enabled) : Boolean(base.is_enabled),
+    };
+}
+
+function toNum(value, fallback = 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function getSafeNavPerUnit(nav, totalUnits) {
+    const units = toNum(totalUnits, 0);
+    const navValue = toNum(nav, 0);
+    if (units <= 0) return 1;
+    return Math.max(0.0001, navValue / units);
+}
+
+async function getFundNavState(fundId) {
+    let utilization = null;
+    try {
+        utilization = await strategyRunner.getFundRiskSnapshot(fundId);
+    } catch {
+        utilization = null;
+    }
+
+    const [netCapitalRow, totalUnitsRow] = await Promise.all([
+        stmts.getFundNetCapital.get(fundId),
+        stmts.getFundTotalUnits.get(fundId),
+    ]);
+
+    const capital = toNum(utilization?.capital, toNum(netCapitalRow?.net_capital, 0));
+    const pnl = toNum(utilization?.totalPnl, 0);
+    const nav = toNum(utilization?.equity, capital + pnl);
+    const totalUnits = toNum(totalUnitsRow?.total_units, 0);
+    const navPerUnit = getSafeNavPerUnit(nav, totalUnits);
+
+    return {
+        capital: +capital.toFixed(2),
+        pnl: +pnl.toFixed(2),
+        nav: +nav.toFixed(2),
+        totalUnits: +totalUnits.toFixed(8),
+        navPerUnit: +navPerUnit.toFixed(8),
+        dailyDrawdownPct: toNum(utilization?.dailyDrawdownPct, 0),
+        utilization: utilization || null,
+    };
+}
+
 // ============================================================
 // FUND ENDPOINTS
 // ============================================================
@@ -510,6 +583,9 @@ router.delete('/funds/:id', authenticate, requireFundOwner, asyncRoute(async (re
     }
 
     // Delete capital, members, then the fund
+    await stmts.deleteFundNavSnapshots.run(fundId);
+    await stmts.deleteFundRiskBreaches.run(fundId);
+    await stmts.deleteFundRiskSettings.run(fundId);
     await stmts.deleteFundCapital.run(fundId);
     await stmts.deleteFundMembers.run(fundId);
     await stmts.deleteFund.run(fundId);
@@ -638,6 +714,8 @@ router.post('/funds/:id/capital', authenticate, requireFundMember, asyncRoute(as
 
     const capitalId = uuid();
     const now = Date.now();
+    const fundNavState = await getFundNavState(req.params.id);
+    const fundPnl = toNum(fundNavState.pnl, 0);
 
     const result = await runInTransaction('fundsCapitalTransfer', async (client) => {
         const userResult = await client.query(
@@ -650,38 +728,109 @@ router.post('/funds/:id/capital', authenticate, requireFundMember, asyncRoute(as
 
         const userCash = Number(userResult.rows[0].cash);
 
-        const userCapitalRows = await client.query(
-            'SELECT amount, type FROM fund_capital WHERE fund_id = $1 AND user_id = $2 FOR UPDATE',
-            [req.params.id, req.user.id]
-        );
-        const userCapital = userCapitalRows.rows.reduce((total, row) => {
-            return total + (row.type === 'deposit' ? Number(row.amount) : -Number(row.amount));
-        }, 0);
+        await client.query('SELECT id FROM fund_capital WHERE fund_id = $1 FOR UPDATE', [req.params.id]);
+        const [fundAggResult, userAggResult] = await Promise.all([
+            client.query(
+                `
+                SELECT
+                    COALESCE(SUM(CASE WHEN type = 'deposit' THEN amount ELSE -amount END), 0) as net_capital,
+                    COALESCE(SUM(units_delta), 0) as total_units
+                FROM fund_capital
+                WHERE fund_id = $1
+                `,
+                [req.params.id]
+            ),
+            client.query(
+                `
+                SELECT
+                    COALESCE(SUM(CASE WHEN type = 'deposit' THEN amount ELSE -amount END), 0) as net_capital,
+                    COALESCE(SUM(units_delta), 0) as total_units
+                FROM fund_capital
+                WHERE fund_id = $1 AND user_id = $2
+                `,
+                [req.params.id, req.user.id]
+            ),
+        ]);
+
+        const fundCapitalBefore = toNum(fundAggResult.rows[0]?.net_capital, 0);
+        const fundUnitsBefore = toNum(fundAggResult.rows[0]?.total_units, 0);
+        const userCapital = toNum(userAggResult.rows[0]?.net_capital, 0);
+        const userUnitsBefore = toNum(userAggResult.rows[0]?.total_units, 0);
+
+        const navBefore = fundCapitalBefore + fundPnl;
+        const navPerUnitBefore = getSafeNavPerUnit(navBefore, fundUnitsBefore);
 
         if (type === 'deposit' && amount > userCash + 1e-6) {
             return { error: `Insufficient cash. Available ${userCash.toFixed(2)}`, status: 400 };
         }
-        if (type === 'withdrawal' && amount > userCapital + 1e-6) {
-            return { error: `Insufficient capital in fund. Available ${userCapital.toFixed(2)}`, status: 400 };
+        const userValueBefore = userUnitsBefore * navPerUnitBefore;
+        if (type === 'withdrawal' && amount > userValueBefore + 1e-6) {
+            return { error: `Insufficient investor value in fund. Available ${userValueBefore.toFixed(2)}`, status: 400 };
         }
+
+        let unitsDelta = type === 'deposit'
+            ? amount / navPerUnitBefore
+            : -(amount / navPerUnitBefore);
+        if (type === 'withdrawal') {
+            unitsDelta = -Math.min(userUnitsBefore, Math.abs(unitsDelta));
+        }
+        unitsDelta = +unitsDelta.toFixed(8);
 
         const newCash = +(type === 'deposit' ? userCash - amount : userCash + amount).toFixed(2);
         await client.query('UPDATE users SET cash = $1 WHERE id = $2', [newCash, req.user.id]);
 
+        const fundCapitalAfter = +(type === 'deposit' ? fundCapitalBefore + amount : fundCapitalBefore - amount).toFixed(2);
+        const fundUnitsAfterRaw = fundUnitsBefore + unitsDelta;
+        const fundUnitsAfter = Math.abs(fundUnitsAfterRaw) < 1e-8 ? 0 : +fundUnitsAfterRaw.toFixed(8);
+        const navAfter = +(fundCapitalAfter + fundPnl).toFixed(2);
+        const navPerUnitAfter = +getSafeNavPerUnit(navAfter, fundUnitsAfter).toFixed(8);
+
         const insertResult = await client.query(
-            'INSERT INTO fund_capital (id, fund_id, user_id, amount, type, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-            [capitalId, req.params.id, req.user.id, amount, type, now]
+            `
+            INSERT INTO fund_capital (
+                id, fund_id, user_id, amount, type, units_delta, nav_per_unit, nav_before, nav_after, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING *
+            `,
+            [capitalId, req.params.id, req.user.id, amount, type, unitsDelta, navPerUnitBefore, navBefore, navAfter, now]
+        );
+
+        await client.query(
+            `
+            INSERT INTO fund_nav_snapshots (fund_id, nav, nav_per_unit, total_units, capital, pnl, snapshot_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `,
+            [req.params.id, navAfter, navPerUnitAfter, fundUnitsAfter, fundCapitalAfter, fundPnl, now]
         );
 
         const newUserCapital = +(type === 'deposit' ? userCapital + amount : userCapital - amount).toFixed(2);
-        return { transaction: insertResult.rows[0], cash: newCash, userCapital: newUserCapital };
+        const newUserUnits = +(userUnitsBefore + unitsDelta).toFixed(8);
+        const newUserValue = +(newUserUnits * navPerUnitAfter).toFixed(2);
+        return {
+            transaction: insertResult.rows[0],
+            cash: newCash,
+            userCapital: newUserCapital,
+            userUnits: newUserUnits,
+            userValue: newUserValue,
+            navPerUnit: navPerUnitAfter,
+            nav: navAfter,
+        };
     });
 
     if (result.error) {
         return res.status(result.status || 400).json({ error: result.error });
     }
 
-    res.status(201).json({ success: true, transaction: result.transaction, cash: result.cash, userCapital: result.userCapital });
+    res.status(201).json({
+        success: true,
+        transaction: result.transaction,
+        cash: result.cash,
+        userCapital: result.userCapital,
+        userUnits: result.userUnits,
+        userValue: result.userValue,
+        navPerUnit: result.navPerUnit,
+        nav: result.nav,
+    });
 }));
 
 // Get capital transactions (fund members only)
@@ -694,6 +843,157 @@ router.get('/funds/:id/capital', authenticate, requireFundMember, asyncRoute(asy
 router.get('/funds/:id/capital/summary', authenticate, requireFundMember, asyncRoute(async (req, res) => {
     const summary = await stmts.getFundCapitalSummary.all(req.params.id, 'deposit');
     res.json(summary);
+}));
+
+// NAV details (fund members only)
+router.get('/funds/:id/nav', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+    const fundId = req.params.id;
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 120, 1), 500);
+
+    const [navState, snapshotsRaw, userUnitsRow, userCapitalRow] = await Promise.all([
+        getFundNavState(fundId),
+        stmts.getFundNavSnapshots.all(fundId, limit),
+        stmts.getUserFundUnits.get(fundId, req.user.id),
+        stmts.getUserFundNetCapital.get(fundId, req.user.id),
+    ]);
+
+    const userUnits = toNum(userUnitsRow?.total_units, 0);
+    const userCapital = toNum(userCapitalRow?.net_capital, 0);
+    const userValue = +(userUnits * navState.navPerUnit).toFixed(2);
+    const userOwnershipPct = navState.totalUnits > 0
+        ? +((userUnits / navState.totalUnits) * 100).toFixed(4)
+        : 0;
+
+    const snapshots = snapshotsRaw
+        .slice()
+        .reverse()
+        .map(s => ({
+            snapshotAt: s.snapshot_at,
+            nav: +toNum(s.nav, 0).toFixed(2),
+            navPerUnit: +toNum(s.nav_per_unit, 1).toFixed(8),
+            totalUnits: +toNum(s.total_units, 0).toFixed(8),
+            capital: +toNum(s.capital, 0).toFixed(2),
+            pnl: +toNum(s.pnl, 0).toFixed(2),
+        }));
+
+    const latestSnapshotAt = snapshots.length ? snapshots[snapshots.length - 1].snapshotAt : 0;
+    if (!latestSnapshotAt || Date.now() - latestSnapshotAt > 60_000) {
+        snapshots.push({
+            snapshotAt: Date.now(),
+            nav: navState.nav,
+            navPerUnit: navState.navPerUnit,
+            totalUnits: navState.totalUnits,
+            capital: navState.capital,
+            pnl: navState.pnl,
+        });
+    }
+
+    res.json({
+        fundId,
+        asOf: Date.now(),
+        nav: navState.nav,
+        navPerUnit: navState.navPerUnit,
+        totalUnits: navState.totalUnits,
+        capital: navState.capital,
+        pnl: navState.pnl,
+        dailyDrawdownPct: navState.dailyDrawdownPct,
+        user: {
+            userId: req.user.id,
+            units: +userUnits.toFixed(8),
+            netCapital: +userCapital.toFixed(2),
+            value: userValue,
+            ownershipPct: userOwnershipPct,
+            pnl: +(userValue - userCapital).toFixed(2),
+        },
+        snapshots,
+    });
+}));
+
+// Investor unit ledger (fund members only)
+router.get('/funds/:id/investors', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+    const fundId = req.params.id;
+    const [navState, investorsRaw] = await Promise.all([
+        getFundNavState(fundId),
+        stmts.getFundInvestorLedger.all(fundId),
+    ]);
+
+    const investors = investorsRaw.map((row) => {
+        const units = toNum(row.units, 0);
+        const netCapital = toNum(row.net_capital, 0);
+        const value = units * navState.navPerUnit;
+        const ownershipPct = navState.totalUnits > 0 ? (units / navState.totalUnits) * 100 : 0;
+        return {
+            user_id: row.user_id,
+            username: row.username,
+            units: +units.toFixed(8),
+            netCapital: +netCapital.toFixed(2),
+            value: +value.toFixed(2),
+            ownershipPct: +ownershipPct.toFixed(4),
+            pnl: +(value - netCapital).toFixed(2),
+        };
+    });
+
+    res.json({
+        fundId,
+        asOf: Date.now(),
+        nav: navState.nav,
+        navPerUnit: navState.navPerUnit,
+        totalUnits: navState.totalUnits,
+        investors,
+    });
+}));
+
+// ============================================================
+// FUND RISK ENDPOINTS
+// ============================================================
+
+// Get risk settings + utilization snapshot (fund members only)
+router.get('/funds/:id/risk', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+    const [settingsRow, snapshot, breaches] = await Promise.all([
+        stmts.getFundRiskSettings.get(req.params.id),
+        strategyRunner.getFundRiskSnapshot(req.params.id),
+        stmts.getFundRiskBreaches.all(req.params.id, 25),
+    ]);
+
+    const settings = strategyRunner.normalizeRiskSettings(settingsRow || strategyRunner.FUND_RISK_DEFAULTS);
+    res.json({
+        settings,
+        utilization: snapshot,
+        breaches,
+    });
+}));
+
+// Update risk settings (owner only)
+router.put('/funds/:id/risk', authenticate, requireFundOwner, asyncRoute(async (req, res) => {
+    const current = strategyRunner.normalizeRiskSettings(
+        await stmts.getFundRiskSettings.get(req.params.id) || strategyRunner.FUND_RISK_DEFAULTS
+    );
+    const nextSettings = normalizeRiskSettingsPayload(req.body || {}, current);
+    const now = Date.now();
+
+    await stmts.upsertFundRiskSettings.run(
+        req.params.id,
+        nextSettings.max_position_pct,
+        nextSettings.max_strategy_allocation_pct,
+        nextSettings.max_daily_drawdown_pct,
+        nextSettings.is_enabled,
+        req.user.id,
+        now
+    );
+
+    const [settingsRow, snapshot] = await Promise.all([
+        stmts.getFundRiskSettings.get(req.params.id),
+        strategyRunner.getFundRiskSnapshot(req.params.id),
+    ]);
+    const settings = strategyRunner.normalizeRiskSettings(settingsRow || nextSettings);
+    res.json({ success: true, settings, utilization: snapshot });
+}));
+
+// Get risk breaches (fund members only)
+router.get('/funds/:id/risk/breaches', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
+    const breaches = await stmts.getFundRiskBreaches.all(req.params.id, limit);
+    res.json(breaches);
 }));
 
 // ============================================================

@@ -11,6 +11,11 @@ const Funds = {
   strategies: [],
   customStrategies: [],
   capitalTransactions: [],
+  navData: null,
+  investorLedger: [],
+  riskSettings: null,
+  riskUtilization: null,
+  riskBreaches: [],
   dashboardData: null,
   dashboardInterval: null,
 
@@ -141,6 +146,7 @@ const Funds = {
           <button class="fund-tab ${this.currentTab === 'overview' ? 'active' : ''}" data-tab="overview">Overview</button>
           <button class="fund-tab ${this.currentTab === 'members' ? 'active' : ''}" data-tab="members">Members</button>
           <button class="fund-tab ${this.currentTab === 'capital' ? 'active' : ''}" data-tab="capital">Capital</button>
+          <button class="fund-tab ${this.currentTab === 'risk' ? 'active' : ''}" data-tab="risk">Risk</button>
           <button class="fund-tab ${this.currentTab === 'strategies' ? 'active' : ''}" data-tab="strategies">Strategies</button>
           <button class="fund-tab ${this.currentTab === 'dashboard' ? 'active' : ''}" data-tab="dashboard">📊 Dashboard</button>
         </div>
@@ -157,6 +163,7 @@ const Funds = {
       case 'overview': return this.renderOverviewTab();
       case 'members': return this.renderMembersTab();
       case 'capital': return this.renderCapitalTab();
+      case 'risk': return this.renderRiskTab();
       case 'strategies': return this.renderStrategiesTab();
       case 'dashboard': return this.renderDashboardTab();
       default: return this.renderOverviewTab();
@@ -268,6 +275,11 @@ const Funds = {
 
   // ─── Capital Tab ─────────────────────────────────────────────────────────────
   renderCapitalTab() {
+    const nav = this.navData || {};
+    const userInvestor = nav.user || this.getUserInvestor();
+    const investors = this.investorLedger || [];
+    const snapshots = nav.snapshots || [];
+
     return `
       <div class="capital-section">
         <div class="capital-actions">
@@ -275,12 +287,104 @@ const Funds = {
           <button class="btn-secondary" onclick="Funds.showWithdrawModal()">Withdraw</button>
         </div>
 
-        <div class="capital-summary">
+        <div class="capital-summary capital-summary-grid">
           <div class="overview-card">
-            <div class="card-label">Your Capital</div>
-            <div class="card-value">${Utils.money(this.getUserCapital())}</div>
+            <div class="card-label">Fund NAV</div>
+            <div class="card-value">${Utils.money(nav.nav || 0)}</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">NAV / Unit</div>
+            <div class="card-value">${Utils.money(nav.navPerUnit || 1, 4)}</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Your Units</div>
+            <div class="card-value">${Utils.num(userInvestor.units || 0, 4)}</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Your Ownership</div>
+            <div class="card-value">${Utils.num(userInvestor.ownershipPct || 0, 2)}%</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Your Investor Value</div>
+            <div class="card-value">${Utils.money(userInvestor.value || 0)}</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Your Net Capital</div>
+            <div class="card-value">${Utils.money(userInvestor.netCapital || 0)}</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Your Unrealized P&L</div>
+            <div class="card-value ${Utils.colorClass(userInvestor.pnl || 0)}">${Utils.money(userInvestor.pnl || 0)}</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Fund Units Outstanding</div>
+            <div class="card-value">${Utils.num(nav.totalUnits || 0, 4)}</div>
           </div>
         </div>
+
+        <h3 style="margin-top:8px;margin-bottom:12px">Investor Ledger</h3>
+        ${investors.length === 0 ? `
+        <div class="empty-state">
+          <span class="empty-icon">📘</span>
+          <span class="empty-text">No investor units yet</span>
+        </div>
+        ` : `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Investor</th>
+              <th>Units</th>
+              <th>Ownership %</th>
+              <th>Net Capital</th>
+              <th>Value</th>
+              <th>P&L</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${investors.map(inv => `
+            <tr>
+              <td style="font-weight:600">${inv.username}</td>
+              <td>${Utils.num(inv.units || 0, 4)}</td>
+              <td>${Utils.num(inv.ownershipPct || 0, 2)}%</td>
+              <td>${Utils.money(inv.netCapital || 0)}</td>
+              <td>${Utils.money(inv.value || 0)}</td>
+              <td class="${Utils.colorClass(inv.pnl || 0)}">${Utils.money(inv.pnl || 0)}</td>
+            </tr>
+            `).join('')}
+          </tbody>
+        </table>
+        `}
+
+        <h3 style="margin-top:24px;margin-bottom:12px">NAV Snapshots</h3>
+        ${snapshots.length === 0 ? `
+        <div class="empty-state">
+          <span class="empty-icon">📉</span>
+          <span class="empty-text">No NAV snapshots yet</span>
+        </div>
+        ` : `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>NAV</th>
+              <th>NAV / Unit</th>
+              <th>Capital</th>
+              <th>P&L</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${snapshots.slice(-12).reverse().map(s => `
+            <tr>
+              <td>${Utils.formatDate(s.snapshotAt)}</td>
+              <td>${Utils.money(s.nav || 0)}</td>
+              <td>${Utils.money(s.navPerUnit || 1, 4)}</td>
+              <td>${Utils.money(s.capital || 0)}</td>
+              <td class="${Utils.colorClass(s.pnl || 0)}">${Utils.money(s.pnl || 0)}</td>
+            </tr>
+            `).join('')}
+          </tbody>
+        </table>
+        `}
 
         ${this.capitalTransactions.length === 0 ? `
         <div class="empty-state">
@@ -295,6 +399,8 @@ const Funds = {
               <th>Date</th>
               <th>Type</th>
               <th>Amount</th>
+              <th>Units Δ</th>
+              <th>NAV / Unit</th>
               <th>User</th>
             </tr>
           </thead>
@@ -304,6 +410,8 @@ const Funds = {
               <td>${Utils.formatDate(t.created_at)}</td>
               <td class="${t.type === 'deposit' ? 'price-up' : 'price-down'}">${t.type.toUpperCase()}</td>
               <td class="mono">${Utils.money(t.amount)}</td>
+              <td class="${(t.units_delta || 0) >= 0 ? 'price-up' : 'price-down'}">${Utils.num(t.units_delta || 0, 4)}</td>
+              <td class="mono">${Utils.money(t.nav_per_unit || 1, 4)}</td>
               <td>${t.username}</td>
             </tr>
             `).join('')}
@@ -322,6 +430,178 @@ const Funds = {
       total += t.type === 'deposit' ? t.amount : -t.amount;
     }
     return total;
+  },
+
+  getUserInvestor() {
+    const userId = App.user?.id;
+    if (!userId) {
+      return { units: 0, netCapital: 0, value: 0, ownershipPct: 0, pnl: 0 };
+    }
+    const investor = (this.investorLedger || []).find(i => i.user_id === userId);
+    if (!investor) {
+      return { units: 0, netCapital: this.getUserCapital(), value: 0, ownershipPct: 0, pnl: 0 };
+    }
+    return investor;
+  },
+
+  // ─── Risk Tab ────────────────────────────────────────────────────────────────
+  renderRiskTab() {
+    const fund = this.currentFund;
+    const isOwner = fund?.role === 'owner';
+    const settings = this.riskSettings || {
+      max_position_pct: 25,
+      max_strategy_allocation_pct: 50,
+      max_daily_drawdown_pct: 8,
+      is_enabled: true
+    };
+    const u = this.riskUtilization || {};
+    const breaches = this.riskBreaches || [];
+
+    return `
+      <div class="risk-section">
+        <div class="risk-overview-grid">
+          <div class="overview-card">
+            <div class="card-label">Risk Engine</div>
+            <div class="card-value ${settings.is_enabled ? 'price-up' : 'text-muted'}">${settings.is_enabled ? 'Enabled' : 'Disabled'}</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Daily Drawdown</div>
+            <div class="card-value ${Utils.colorClass(-(u.dailyDrawdownPct || 0))}">${(u.dailyDrawdownPct || 0).toFixed(2)}%</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Gross Exposure</div>
+            <div class="card-value">${(u.grossExposurePct || 0).toFixed(2)}%</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Fund Capital</div>
+            <div class="card-value">${Utils.money(u.capital || 0)}</div>
+          </div>
+        </div>
+
+        <div class="risk-limit-grid">
+          <div class="overview-card">
+            <div class="card-label">Max Position %</div>
+            ${isOwner ? `<input type="number" id="risk-max-position-pct" min="1" max="100" step="0.1" value="${settings.max_position_pct}">` : `<div class="card-value">${settings.max_position_pct.toFixed(2)}%</div>`}
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Max Strategy Allocation %</div>
+            ${isOwner ? `<input type="number" id="risk-max-strategy-pct" min="1" max="100" step="0.1" value="${settings.max_strategy_allocation_pct}">` : `<div class="card-value">${settings.max_strategy_allocation_pct.toFixed(2)}%</div>`}
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Max Daily Drawdown %</div>
+            ${isOwner ? `<input type="number" id="risk-max-drawdown-pct" min="0.1" max="100" step="0.1" value="${settings.max_daily_drawdown_pct}">` : `<div class="card-value">${settings.max_daily_drawdown_pct.toFixed(2)}%</div>`}
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Status</div>
+            ${isOwner ? `
+              <label class="risk-toggle">
+                <input type="checkbox" id="risk-enabled" ${settings.is_enabled ? 'checked' : ''}>
+                <span>${settings.is_enabled ? 'Enabled' : 'Disabled'}</span>
+              </label>
+            ` : `<div class="card-value">${settings.is_enabled ? 'Enabled' : 'Disabled'}</div>`}
+          </div>
+        </div>
+
+        ${isOwner ? `
+          <div class="risk-actions">
+            <button class="btn-primary" onclick="Funds.saveRiskSettings()">Save Risk Settings</button>
+          </div>
+        ` : ''}
+
+        <h3 style="margin-top:16px;margin-bottom:10px">Top Exposures by Ticker</h3>
+        ${u.byTicker && u.byTicker.length ? `
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th>Exposure</th>
+                <th>Exposure % of Capital</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${u.byTicker.map(row => `
+                <tr>
+                  <td style="font-weight:700">${row.ticker}</td>
+                  <td>${Utils.money(row.exposure)}</td>
+                  <td>${row.exposurePct.toFixed(2)}%</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : `
+          <div class="empty-state" style="padding:20px">
+            <span class="empty-icon">🧮</span>
+            <span class="empty-text">No open strategy exposure yet.</span>
+          </div>
+        `}
+
+        <h3 style="margin-top:20px;margin-bottom:10px">Risk Breach History</h3>
+        ${breaches.length ? `
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Rule</th>
+                <th>Message</th>
+                <th>Trade</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${breaches.map(b => this.renderRiskBreachRow(b)).join('')}
+            </tbody>
+          </table>
+        ` : `
+          <div class="empty-state" style="padding:20px">
+            <span class="empty-icon">✅</span>
+            <span class="empty-text">No risk breaches recorded.</span>
+          </div>
+        `}
+      </div>
+    `;
+  },
+
+  renderRiskBreachRow(breach) {
+    let blockedTrade = breach.blocked_trade || {};
+    if (typeof blockedTrade === 'string') {
+      try {
+        blockedTrade = JSON.parse(blockedTrade || '{}');
+      } catch {
+        blockedTrade = {};
+      }
+    }
+    const tradeLabel = blockedTrade.ticker
+      ? `${String(blockedTrade.side || '').toUpperCase()} ${blockedTrade.quantity || 0} ${blockedTrade.ticker} @ ${Utils.num(blockedTrade.price || 0)}`
+      : '—';
+    return `
+      <tr>
+        <td>${Utils.formatDate(breach.created_at)}</td>
+        <td style="font-weight:700">${breach.rule}</td>
+        <td>${breach.message}</td>
+        <td>${tradeLabel}</td>
+      </tr>
+    `;
+  },
+
+  async saveRiskSettings() {
+    const fundId = this.currentFund?.id;
+    if (!fundId) return;
+
+    const payload = {
+      max_position_pct: parseFloat(document.getElementById('risk-max-position-pct')?.value),
+      max_strategy_allocation_pct: parseFloat(document.getElementById('risk-max-strategy-pct')?.value),
+      max_daily_drawdown_pct: parseFloat(document.getElementById('risk-max-drawdown-pct')?.value),
+      is_enabled: document.getElementById('risk-enabled')?.checked ?? true
+    };
+
+    try {
+      const result = await Utils.put('/funds/' + fundId + '/risk', payload);
+      this.riskSettings = result.settings;
+      this.riskUtilization = result.utilization;
+      Utils.showToast('info', 'Risk Updated', 'Fund risk settings saved');
+      this.updateContent();
+    } catch (e) {
+      Utils.showToast('error', 'Risk Update Failed', e.message);
+    }
   },
 
   // ─── Strategies Tab ──────────────────────────────────────────────────────────
@@ -396,12 +676,15 @@ const Funds = {
 
   async loadFundDetails(fundId) {
     try {
-      const [fund, members, strategies, customStrategies, capital] = await Promise.all([
+      const [fund, members, strategies, customStrategies, capital, navData, investors, riskData] = await Promise.all([
         Utils.get('/funds/' + fundId),
         Utils.get('/funds/' + fundId + '/members'),
         Utils.get('/funds/' + fundId + '/strategies'),
         Utils.get('/funds/' + fundId + '/custom-strategies'),
-        Utils.get('/funds/' + fundId + '/capital')
+        Utils.get('/funds/' + fundId + '/capital'),
+        Utils.get('/funds/' + fundId + '/nav').catch(() => null),
+        Utils.get('/funds/' + fundId + '/investors').catch(() => ({ investors: [] })),
+        Utils.get('/funds/' + fundId + '/risk').catch(() => null)
       ]);
 
       // Get role from myFunds
@@ -411,6 +694,11 @@ const Funds = {
       this.strategies = strategies;
       this.customStrategies = customStrategies;
       this.capitalTransactions = capital;
+      this.navData = navData;
+      this.investorLedger = investors?.investors || [];
+      this.riskSettings = riskData?.settings || null;
+      this.riskUtilization = riskData?.utilization || null;
+      this.riskBreaches = riskData?.breaches || [];
     } catch (e) {
       console.error('Failed to load fund details:', e);
       Utils.showToast('error', 'Load Failed', e.message);
@@ -430,6 +718,11 @@ const Funds = {
     this.strategies = [];
     this.customStrategies = [];
     this.capitalTransactions = [];
+    this.navData = null;
+    this.investorLedger = [];
+    this.riskSettings = null;
+    this.riskUtilization = null;
+    this.riskBreaches = [];
     this.updateContent();
   },
 
@@ -445,7 +738,49 @@ const Funds = {
     if (tab === 'dashboard') {
       this.loadDashboard();
     }
+    if (tab === 'capital') {
+      this.loadCapitalData();
+    }
+    if (tab === 'risk') {
+      this.loadRiskData();
+    }
     this.updateContent();
+  },
+
+  async loadCapitalData() {
+    const fundId = this.currentFund?.id;
+    if (!fundId) return;
+    try {
+      const [capital, navData, investors] = await Promise.all([
+        Utils.get('/funds/' + fundId + '/capital'),
+        Utils.get('/funds/' + fundId + '/nav').catch(() => this.navData),
+        Utils.get('/funds/' + fundId + '/investors').catch(() => ({ investors: this.investorLedger }))
+      ]);
+      this.capitalTransactions = capital || this.capitalTransactions;
+      this.navData = navData || this.navData;
+      this.investorLedger = investors?.investors || this.investorLedger;
+      if (this.currentTab === 'capital') {
+        this.updateContent();
+      }
+    } catch (e) {
+      // Keep existing data if refresh fails
+    }
+  },
+
+  async loadRiskData() {
+    const fundId = this.currentFund?.id;
+    if (!fundId) return;
+    try {
+      const riskData = await Utils.get('/funds/' + fundId + '/risk');
+      this.riskSettings = riskData?.settings || this.riskSettings;
+      this.riskUtilization = riskData?.utilization || this.riskUtilization;
+      this.riskBreaches = riskData?.breaches || this.riskBreaches;
+      if (this.currentTab === 'risk') {
+        this.updateContent();
+      }
+    } catch (e) {
+      // Keep existing risk data if live refresh fails
+    }
   },
 
   updateContent() {
@@ -816,12 +1151,17 @@ const Funds = {
       document.getElementById('deposit-modal')?.remove();
 
       // Refresh data
-      const [capital, user] = await Promise.all([
+      const [capital, user, navData, investors] = await Promise.all([
         Utils.get('/funds/' + fundId + '/capital'),
-        Utils.get('/me')
+        Utils.get('/me'),
+        Utils.get('/funds/' + fundId + '/nav').catch(() => this.navData),
+        Utils.get('/funds/' + fundId + '/investors').catch(() => ({ investors: this.investorLedger })
+        )
       ]);
       this.capitalTransactions = capital;
       App.user = user;
+      this.navData = navData || this.navData;
+      this.investorLedger = investors?.investors || this.investorLedger;
       const cashEl = document.getElementById('header-cash');
       if (cashEl) cashEl.textContent = Utils.money(user.cash);
       this.updateContent();
@@ -831,7 +1171,8 @@ const Funds = {
   },
 
   showWithdrawModal() {
-    const userCapital = this.getUserCapital();
+    const userInvestor = this.navData?.user || this.getUserInvestor();
+    const withdrawable = Number(userInvestor.value || 0);
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
     modal.id = 'withdraw-modal';
@@ -843,12 +1184,12 @@ const Funds = {
         </div>
         <div class="modal-body">
           <div class="form-group">
-            <label>Your Capital in Fund</label>
-            <div class="form-value">${Utils.money(userCapital)}</div>
+            <label>Your Investor Value</label>
+            <div class="form-value">${Utils.money(withdrawable)}</div>
           </div>
           <div class="form-group">
             <label>Amount to Withdraw</label>
-            <input type="number" id="withdraw-amount" placeholder="0.00" min="0" max="${userCapital}" step="0.01">
+            <input type="number" id="withdraw-amount" placeholder="0.00" min="0" max="${withdrawable}" step="0.01">
           </div>
         </div>
         <div class="modal-footer">
@@ -864,7 +1205,8 @@ const Funds = {
   async withdrawCapital() {
     const fundId = this.currentFund?.id;
     const amount = parseFloat(document.getElementById('withdraw-amount')?.value);
-    const availableCapital = this.getUserCapital();
+    const userInvestor = this.navData?.user || this.getUserInvestor();
+    const availableCapital = Number(userInvestor.value || 0);
 
     if (!fundId) return;
 
@@ -883,12 +1225,17 @@ const Funds = {
       document.getElementById('withdraw-modal')?.remove();
 
       // Refresh data
-      const [capital, user] = await Promise.all([
+      const [capital, user, navData, investors] = await Promise.all([
         Utils.get('/funds/' + fundId + '/capital'),
-        Utils.get('/me')
+        Utils.get('/me'),
+        Utils.get('/funds/' + fundId + '/nav').catch(() => this.navData),
+        Utils.get('/funds/' + fundId + '/investors').catch(() => ({ investors: this.investorLedger })
+        )
       ]);
       this.capitalTransactions = capital;
       App.user = user;
+      this.navData = navData || this.navData;
+      this.investorLedger = investors?.investors || this.investorLedger;
       const cashEl = document.getElementById('header-cash');
       if (cashEl) cashEl.textContent = Utils.money(user.cash);
       this.updateContent();
