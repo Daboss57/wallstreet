@@ -84,7 +84,7 @@ const Terminal = {
           </nav>
           <div class="header-balance">
             <span class="balance-label">Balance</span>
-            <span class="balance-value" id="header-cash">${Utils.money(user.cash || 100000)}</span>
+            <span class="balance-value" id="header-cash">${Utils.money(user.cash ?? 100000)}</span>
           </div>
           <div class="header-user">
             <div class="user-avatar">${(user.username || 'U')[0].toUpperCase()}</div>

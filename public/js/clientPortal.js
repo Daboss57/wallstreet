@@ -7,6 +7,7 @@
 const ClientPortal = {
     currentFundId: null,
     allocation: null,
+    navData: null,
     performance: null,
     transactions: [],
     strategies: [],
@@ -156,38 +157,60 @@ const ClientPortal = {
     },
 
     renderAllocationContent() {
-        if (!this.allocation) return '<div class="loading-spinner"></div>';
+        if (!this.allocation && !this.navData) return '<div class="loading-spinner"></div>';
 
-        const pnlClass = this.allocation.unrealized_pnl >= 0 ? 'positive' : 'negative';
-        const pnlSign = this.allocation.unrealized_pnl >= 0 ? '+' : '';
+        const currentFund = this.clientFunds.find(f => f.id === this.currentFundId) || {};
+        const navUser = this.navData?.user || null;
+
+        const capitalContributed = navUser
+            ? Number(navUser.netCapital || 0)
+            : Number(this.allocation?.capital_contributed || 0);
+        const currentValue = navUser
+            ? Number(navUser.value || 0)
+            : Number(this.allocation?.current_value || 0);
+        const unrealizedPnl = navUser
+            ? Number(navUser.pnl || 0)
+            : Number(this.allocation?.unrealized_pnl || 0);
+        const ownershipPct = navUser
+            ? Number(navUser.ownershipPct || 0)
+            : Number(this.allocation?.ownership_pct || 0);
+        const returnPct = capitalContributed !== 0
+            ? (unrealizedPnl / capitalContributed) * 100
+            : Number(this.allocation?.return_pct || 0);
+        const managementFee = Number(this.allocation?.management_fee ?? currentFund.management_fee ?? 0);
+        const performanceFee = Number(this.allocation?.performance_fee ?? currentFund.performance_fee ?? 0);
+
+        const pnlClass = unrealizedPnl >= 0 ? 'positive' : 'negative';
+        const pnlSign = unrealizedPnl >= 0 ? '+' : '';
+        const returnSign = returnPct >= 0 ? '+' : '';
 
         return `
             <div class="cp-allocation-main">
                 <div class="cp-allocation-value">
                     <span class="cp-value-label">Current Value</span>
-                    <span class="cp-value-amount">${Utils.money(this.allocation.current_value)}</span>
+                    <span class="cp-value-amount">${Utils.money(currentValue)}</span>
                 </div>
                 <div class="cp-allocation-pnl ${pnlClass}">
-                    <span class="cp-pnl-value">${pnlSign}${Utils.money(this.allocation.unrealized_pnl)}</span>
-                    <span class="cp-pnl-pct">${pnlSign}${this.allocation.return_pct}%</span>
+                    <span class="cp-pnl-value">${pnlSign}${Utils.money(unrealizedPnl)}</span>
+                    <span class="cp-pnl-pct">${returnSign}${Utils.num(returnPct, 2)}%</span>
                 </div>
             </div>
             <div class="cp-allocation-details">
                 <div class="cp-detail-row">
                     <span class="cp-detail-label">Capital Contributed</span>
-                    <span class="cp-detail-value">${Utils.money(this.allocation.capital_contributed)}</span>
+                    <span class="cp-detail-value">${Utils.money(capitalContributed)}</span>
                 </div>
                 <div class="cp-detail-row">
                     <span class="cp-detail-label">Ownership</span>
-                    <span class="cp-detail-value">${this.allocation.ownership_pct}%</span>
+                    <span class="cp-detail-value">${Utils.num(ownershipPct, 2)}%</span>
                 </div>
                 <div class="cp-detail-row">
                     <span class="cp-detail-label">Management Fee</span>
-                    <span class="cp-detail-value">${(this.allocation.management_fee * 100).toFixed(1)}%</span>
+                    <span class="cp-detail-value">${(managementFee * 100).toFixed(1)}%</span>
                 </div>
                 <div class="cp-detail-row">
                     <span class="cp-detail-label">Performance Fee</span>
-                    <span class="cp-detail-value">${(this.allocation.performance_fee * 100).toFixed(1)}%</span>
+                    <span class="cp-detail-value">${(performanceFee * 100).toFixed(1)}%</span>
                 </div>
             </div>
         `;
@@ -368,8 +391,9 @@ const ClientPortal = {
         const params = `?fund_id=${fundId}`;
 
         try {
-            const [allocation, performance, transactions, strategies, fundSummary] = await Promise.all([
+            const [allocation, navData, performance, transactions, strategies, fundSummary] = await Promise.all([
                 Utils.get(`/client-portal/allocation${params}`).catch(() => null),
+                Utils.get(`/funds/${fundId}/nav`).catch(() => null),
                 Utils.get(`/client-portal/performance${params}`).catch(() => null),
                 Utils.get(`/client-portal/transactions${params}`).catch(() => ({ transactions: [] })),
                 Utils.get(`/client-portal/strategies${params}`).catch(() => ({ strategies: [] })),
@@ -377,6 +401,7 @@ const ClientPortal = {
             ]);
 
             this.allocation = allocation;
+            this.navData = navData;
             this.performance = performance;
             this.transactions = transactions;
             this.strategies = strategies;
