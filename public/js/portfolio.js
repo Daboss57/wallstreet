@@ -15,10 +15,10 @@ const Portfolio = {
         <div class="portfolio-page">
           <h1>💼 Portfolio Dashboard</h1>
 
-          <div class="portfolio-summary">
+            <div class="portfolio-summary">
             <div class="portfolio-stat-card">
               <div class="psc-label">Total Portfolio Value</div>
-              <div class="psc-value">${Utils.money(s.totalValue || 100000)}</div>
+              <div class="psc-value">${Utils.money(s.totalValue ?? 100000)}</div>
               <div class="psc-sub ${Utils.colorClass(s.allTimeReturn || 0)}">${Utils.pct(s.allTimeReturn || 0)} all-time</div>
             </div>
             <div class="portfolio-stat-card">

@@ -14,7 +14,7 @@ const Account = {
         const profile = this.profile || App.user || {};
         const stats = this.stats || {};
         const totalValue = Number(stats.totalValue || profile.cash || 0);
-        const startingCash = Number(profile.starting_cash || 100000);
+        const startingCash = Number(profile.starting_cash ?? 100000);
         const pnlValue = +(totalValue - startingCash).toFixed(2);
         const allTimeReturn = Number.isFinite(stats.allTimeReturn)
             ? Number(stats.allTimeReturn)
@@ -32,7 +32,7 @@ const Account = {
           <div class="account-overview-grid">
             <div class="portfolio-stat-card">
               <div class="psc-label">Cash Balance</div>
-              <div class="psc-value">${Utils.money(profile.cash || 0)}</div>
+              <div class="psc-value">${Utils.money(profile.cash ?? 0)}</div>
               <div class="psc-sub text-muted">Available to trade or deposit into funds</div>
             </div>
             <div class="portfolio-stat-card">

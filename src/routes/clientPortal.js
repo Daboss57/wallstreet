@@ -85,36 +85,41 @@ router.get('/allocation', asyncRoute(async (req, res) => {
     // Get user's capital transactions in this fund
     const transactions = await stmts.getUserCapitalInFund.all(fundId, userId);
 
-    // Calculate total contributed (deposits - withdrawals)
-    let totalContributed = 0;
-    for (const tx of transactions) {
-        if (tx.type === 'deposit') {
-            totalContributed += tx.amount;
-        } else if (tx.type === 'withdrawal') {
-            totalContributed -= tx.amount;
-        }
-    }
+    const normalizedTransactions = (transactions || []).map((tx) => {
+        const amount = Number(tx.amount || 0);
+        const inferredUnits = tx.type === 'deposit' ? amount : -amount;
+        return {
+            amount,
+            type: tx.type,
+            unitsDelta: Number(tx.units_delta ?? inferredUnits ?? 0),
+        };
+    });
 
-    // Get all capital for this fund to calculate ownership percentage
-    const allCapitalTxns = await stmts.getFundCapitalTransactions.all(fundId);
-    let totalFundCapital = 0;
-    for (const tx of allCapitalTxns) {
-        if (tx.type === 'deposit') {
-            totalFundCapital += tx.amount;
-        } else if (tx.type === 'withdrawal') {
-            totalFundCapital -= tx.amount;
-        }
-    }
+    const userUnits = normalizedTransactions.reduce((sum, tx) => sum + tx.unitsDelta, 0);
+    const totalContributed = normalizedTransactions.reduce((sum, tx) => (
+        sum + (tx.type === 'deposit' ? tx.amount : -tx.amount)
+    ), 0);
 
-    // Calculate ownership percentage
-    const ownershipPct = totalFundCapital > 0 ? (totalContributed / totalFundCapital) * 100 : 0;
-
-    // For current value, we'd need to track fund performance
-    // For now, use a simulated return based on fund strategy
-    // In production, this would come from actual fund P&L tracking
-    const fundReturnPct = calculateSimulatedFundReturn(req.fund);
-    const currentValue = totalContributed * (1 + fundReturnPct / 100);
+    const [allCapitalTxns, snapshotsRaw, netCapitalRow] = await Promise.all([
+        stmts.getFundCapitalTransactions.all(fundId),
+        stmts.getFundNavSnapshots.all(fundId, 1),
+        stmts.getFundNetCapital.get(fundId),
+    ]);
+    const normalizedAllTx = (allCapitalTxns || []).map((tx) => {
+        const amount = Number(tx.amount || 0);
+        const inferredUnits = tx.type === 'deposit' ? amount : -amount;
+        return Number(tx.units_delta ?? inferredUnits ?? 0);
+    });
+    const totalUnits = normalizedAllTx.reduce((sum, units) => sum + units, 0);
+    const latestSnapshot = snapshotsRaw && snapshotsRaw[0] ? snapshotsRaw[0] : null;
+    const navPerUnit = Number(latestSnapshot?.nav_per_unit || 1);
+    const currentValue = userUnits * navPerUnit;
     const unrealizedPnl = currentValue - totalContributed;
+    const returnPct = totalContributed !== 0 ? (unrealizedPnl / totalContributed) * 100 : 0;
+    const ownershipPct = totalUnits > 0 ? (userUnits / totalUnits) * 100 : 0;
+    const fundCapital = Number(netCapitalRow?.net_capital || 0);
+    const fundCurrentValue = totalUnits * navPerUnit;
+    const fundReturnPct = fundCapital > 0 ? ((fundCurrentValue - fundCapital) / fundCapital) * 100 : 0;
 
     res.json({
         fund_id: fundId,
@@ -122,8 +127,9 @@ router.get('/allocation', asyncRoute(async (req, res) => {
         capital_contributed: Math.round(totalContributed * 100) / 100,
         current_value: Math.round(currentValue * 100) / 100,
         unrealized_pnl: Math.round(unrealizedPnl * 100) / 100,
-        return_pct: Math.round(fundReturnPct * 100) / 100,
+        return_pct: Math.round(returnPct * 100) / 100,
         ownership_pct: Math.round(ownershipPct * 100) / 100,
+        fund_return_pct: Math.round(fundReturnPct * 100) / 100,
         management_fee: req.fund.management_fee,
         performance_fee: req.fund.performance_fee,
     });
@@ -137,54 +143,66 @@ router.get('/performance', asyncRoute(async (req, res) => {
     const userId = req.user.id;
     const fundId = req.fund.id;
 
-    // Get user's capital transactions
-    const transactions = await stmts.getUserCapitalInFund.all(fundId, userId);
+    const [transactionsRaw, snapshotsRaw] = await Promise.all([
+        stmts.getUserCapitalInFund.all(fundId, userId),
+        stmts.getFundNavSnapshots.all(fundId, 2000),
+    ]);
 
-    // Calculate total contributed
-    let totalContributed = 0;
-    for (const tx of transactions) {
-        totalContributed += tx.type === 'deposit' ? tx.amount : -tx.amount;
-    }
+    const transactions = (transactionsRaw || [])
+        .map((tx) => {
+            const amount = Number(tx.amount || 0);
+            const inferredUnits = tx.type === 'deposit' ? amount : -amount;
+            return {
+                createdAt: Number(tx.created_at || 0),
+                amount,
+                type: tx.type,
+                unitsDelta: Number(tx.units_delta ?? inferredUnits ?? 0),
+            };
+        })
+        .filter((tx) => Number.isFinite(tx.createdAt) && tx.createdAt > 0)
+        .sort((a, b) => a.createdAt - b.createdAt);
 
-    // Simulate performance over time (in production, would track actual fund performance)
+    const snapshots = (snapshotsRaw || [])
+        .map((s) => ({
+            snapshotAt: Number(s.snapshot_at || 0),
+            navPerUnit: Number(s.nav_per_unit || 1),
+        }))
+        .filter((s) => Number.isFinite(s.snapshotAt) && s.snapshotAt > 0)
+        .sort((a, b) => a.snapshotAt - b.snapshotAt);
+
+    const totalContributed = transactions.reduce((sum, tx) => (
+        sum + (tx.type === 'deposit' ? tx.amount : -tx.amount)
+    ), 0);
+    const currentUnits = cumulativeUnitsAt(transactions, Date.now());
+    const currentNavPerUnit = latestNavPerUnitAt(snapshots, Date.now());
+    const currentValue = currentUnits * currentNavPerUnit;
+
+    const performanceHistory = buildInvestorPerformanceHistory(transactions, snapshots, currentValue);
     const now = Date.now();
     const dayMs = 24 * 60 * 60 * 1000;
     const weekMs = 7 * dayMs;
     const monthMs = 30 * dayMs;
 
-    // Generate performance timeline based on fund strategy
-    const fundReturnPct = calculateSimulatedFundReturn(req.fund);
-    const currentValue = totalContributed * (1 + fundReturnPct / 100);
-
-    // Create performance data points
-    const performanceHistory = generatePerformanceHistory(
-        totalContributed,
-        fundReturnPct,
-        transactions
-    );
-
-    // Calculate period returns
     const weeklyReturn = calculatePeriodReturn(performanceHistory, weekMs);
     const monthlyReturn = calculatePeriodReturn(performanceHistory, monthMs);
-    const lifetimeReturn = fundReturnPct;
+    const lifetimeReturn = totalContributed !== 0 ? ((currentValue - totalContributed) / totalContributed) * 100 : 0;
 
-    // Calculate daily P&L for chart
     const dailyPnl = performanceHistory.map(point => ({
         date: new Date(point.timestamp).toISOString().split('T')[0],
-        value: point.value,
-        pnl: point.value - totalContributed,
-        pnl_pct: totalContributed > 0 ? ((point.value - totalContributed) / totalContributed) * 100 : 0,
+        value: round2(point.value),
+        pnl: round2(point.value - totalContributed),
+        pnl_pct: totalContributed > 0 ? round4(((point.value - totalContributed) / totalContributed) * 100) : 0,
     }));
 
     res.json({
         fund_id: fundId,
         fund_name: req.fund.name,
-        lifetime_return_pct: Math.round(lifetimeReturn * 100) / 100,
-        monthly_return_pct: Math.round(monthlyReturn * 100) / 100,
-        weekly_return_pct: Math.round(weeklyReturn * 100) / 100,
-        total_pnl: Math.round((currentValue - totalContributed) * 100) / 100,
-        starting_capital: totalContributed,
-        current_value: Math.round(currentValue * 100) / 100,
+        lifetime_return_pct: round2(lifetimeReturn),
+        monthly_return_pct: round2(monthlyReturn),
+        weekly_return_pct: round2(weeklyReturn),
+        total_pnl: round2(currentValue - totalContributed),
+        starting_capital: round2(totalContributed),
+        current_value: round2(currentValue),
         performance_history: dailyPnl.slice(-90), // Last 90 days
     });
 }));
@@ -285,28 +303,29 @@ router.get('/fund-summary', asyncRoute(async (req, res) => {
     const fundId = req.fund.id;
 
     // Get all members (count only, no names)
-    const members = await stmts.getFundMembers.all(fundId);
+    const [members, allCapitalTxns, strategies, customStrategies, snapshotsRaw, netCapitalRow] = await Promise.all([
+        stmts.getFundMembers.all(fundId),
+        stmts.getFundCapitalTransactions.all(fundId),
+        stmts.getStrategiesByFund.all(fundId),
+        stmts.getCustomStrategiesByFund.all(fundId),
+        stmts.getFundNavSnapshots.all(fundId, 1),
+        stmts.getFundNetCapital.get(fundId),
+    ]);
 
-    // Get all capital transactions
-    const allCapitalTxns = await stmts.getFundCapitalTransactions.all(fundId);
-
-    // Calculate total AUM
-    let totalAum = 0;
+    let totalCapital = 0;
     for (const tx of allCapitalTxns) {
-        totalAum += tx.type === 'deposit' ? tx.amount : -tx.amount;
+        totalCapital += tx.type === 'deposit' ? Number(tx.amount || 0) : -Number(tx.amount || 0);
     }
+    const latestSnapshot = snapshotsRaw && snapshotsRaw[0] ? snapshotsRaw[0] : null;
+    const snapshotNav = Number(latestSnapshot?.nav || 0);
+    const snapshotCapital = Number(latestSnapshot?.capital || totalCapital);
+    const navPerUnit = Number(latestSnapshot?.nav_per_unit || 1);
+    const totalAum = snapshotNav > 0 ? snapshotNav : totalCapital;
 
     // Count clients (members with client role)
     const clientCount = members.filter(m => m.role === 'client').length;
-
-    // Calculate overall fund return
-    const fundReturnPct = calculateSimulatedFundReturn(req.fund);
-
-    // Get strategy counts
-    const [strategies, customStrategies] = await Promise.all([
-        stmts.getStrategiesByFund.all(fundId),
-        stmts.getCustomStrategiesByFund.all(fundId),
-    ]);
+    const netCapital = Number(netCapitalRow?.net_capital ?? snapshotCapital ?? totalCapital ?? 0);
+    const fundReturnPct = netCapital > 0 ? ((totalAum - netCapital) / netCapital) * 100 : 0;
 
     const activeStrategies = [...strategies, ...customStrategies].filter(s => s.is_active).length;
     const totalStrategies = strategies.length + customStrategies.length;
@@ -315,10 +334,13 @@ router.get('/fund-summary', asyncRoute(async (req, res) => {
         fund_id: fundId,
         fund_name: req.fund.name,
         strategy_type: req.fund.strategy_type,
-        total_aum: Math.round(totalAum * 100) / 100,
+        total_aum: round2(totalAum),
+        total_capital: round2(netCapital),
+        nav_per_unit: round8(navPerUnit),
+        nav_as_of: Number(latestSnapshot?.snapshot_at || Date.now()),
         member_count: members.length,
         client_count: clientCount,
-        overall_return_pct: Math.round(fundReturnPct * 100) / 100,
+        overall_return_pct: round2(fundReturnPct),
         active_strategies: activeStrategies,
         total_strategies: totalStrategies,
         management_fee: req.fund.management_fee,
@@ -571,6 +593,32 @@ function latestNavPerUnitAt(snapshots, timestamp) {
         else break;
     }
     return navPerUnit;
+}
+
+function buildInvestorPerformanceHistory(transactions, snapshots, fallbackCurrentValue) {
+    if (!snapshots.length) {
+        return [{
+            timestamp: Date.now(),
+            value: Number.isFinite(fallbackCurrentValue) ? fallbackCurrentValue : 0,
+        }];
+    }
+    const points = [];
+    for (const s of snapshots) {
+        const units = cumulativeUnitsAt(transactions, s.snapshotAt);
+        points.push({
+            timestamp: s.snapshotAt,
+            value: units * s.navPerUnit,
+        });
+    }
+    const last = points[points.length - 1];
+    const now = Date.now();
+    if (!last || now - last.timestamp > 60_000) {
+        points.push({
+            timestamp: now,
+            value: Number.isFinite(fallbackCurrentValue) ? fallbackCurrentValue : (last ? last.value : 0),
+        });
+    }
+    return points;
 }
 
 /**
