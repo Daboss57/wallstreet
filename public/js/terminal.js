@@ -12,6 +12,7 @@ const Terminal = {
   positions: [],
   openOrders: [],
   trades: [],
+  executionEstimate: null,
   _watchlistFilter: '',
   _bottomTab: 'positions',
 
@@ -56,6 +57,7 @@ const Terminal = {
 
   renderHeader() {
     const user = App.user || {};
+    const cash = Utils.toNumber(user.cash, 0);
     const currentHash = window.location.hash || '#/terminal';
     const activeClass = (route) => (currentHash === route ? 'active' : '');
     return `
@@ -84,7 +86,7 @@ const Terminal = {
           </nav>
           <div class="header-balance">
             <span class="balance-label">Balance</span>
-            <span class="balance-value" id="header-cash">${Utils.money(user.cash ?? 100000)}</span>
+            <span class="balance-value" id="header-cash">${Utils.money(cash)}</span>
           </div>
           <div class="header-user">
             <div class="user-avatar">${(user.username || 'U')[0].toUpperCase()}</div>
@@ -194,7 +196,7 @@ const Terminal = {
   renderOrderPanel() {
     const t = this.priceCache[this.selectedTicker] || this.tickers[this.selectedTicker] || {};
     const price = t.price || 0;
-    const cash = App.user?.cash || 0;
+    const cash = Utils.toNumber(App.user?.cash, 0);
     const maxQty = price > 0 ? Math.floor(cash / price) : 0;
     const pos = this.positions.find(p => p.ticker === this.selectedTicker);
 
@@ -269,6 +271,14 @@ const Terminal = {
             <div class="order-preview-row"><span class="label">Est. Total</span><span class="value" id="preview-total">--</span></div>
             <div class="order-preview-row"><span class="label">Buying Power</span><span class="value" id="preview-bp">${Utils.money(cash)}</span></div>
             <div class="order-preview-row" id="preview-bp-after-row"><span class="label">BP After</span><span class="value" id="preview-bp-after">--</span></div>
+          </div>
+          <div class="order-preview" id="execution-estimate-panel">
+            <div class="order-preview-row"><span class="label">Execution Estimate</span><span class="value" id="ee-regime">--</span></div>
+            <div class="order-preview-row"><span class="label">Slippage</span><span class="value" id="ee-slippage">--</span></div>
+            <div class="order-preview-row"><span class="label">Commission</span><span class="value" id="ee-commission">--</span></div>
+            <div class="order-preview-row"><span class="label">Borrow / Day</span><span class="value" id="ee-borrow">--</span></div>
+            <div class="order-preview-row"><span class="label">Total Cost</span><span class="value" id="ee-total">--</span></div>
+            <div class="order-preview-row"><span class="label">Quality</span><span class="value" id="ee-quality">--</span></div>
           </div>
           <button class="order-submit-btn ${this.orderSide === 'buy' ? 'buy-btn' : 'sell-btn'}" id="order-submit">
             ${this.orderSide === 'buy' ? '🟢 BUY' : '🔴 SELL'} ${this.selectedTicker}
@@ -365,7 +375,7 @@ const Terminal = {
       return `<div class="empty-state"><span class="empty-icon">📊</span><span class="empty-text">No trades yet</span></div>`;
     }
     let html = `<table class="data-table"><thead><tr>
-      <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Total</th><th>P&L</th>
+      <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Slip</th><th>Comm</th><th>Borrow</th><th>Net</th><th>Regime</th>
     </tr></thead><tbody>`;
     for (const t of this.trades) {
       const colorCls = Utils.colorClass(t.pnl);
@@ -375,8 +385,11 @@ const Terminal = {
         <td class="${t.side === 'buy' ? 'price-up' : 'price-down'}" style="font-weight:700">${t.side.toUpperCase()}</td>
         <td>${t.qty}</td>
         <td>${Utils.num(t.price)}</td>
-        <td>${Utils.money(t.total)}</td>
+        <td>${Number(t.slippage_bps || 0).toFixed(2)} bps</td>
+        <td>${Utils.money(t.commission || 0)}</td>
+        <td>${Utils.money(t.borrow_cost || 0)}</td>
         <td class="${colorCls}">${Utils.money(t.pnl)}</td>
+        <td>${t.regime || '—'}</td>
       </tr>`;
     }
     html += '</tbody></table>';
@@ -424,6 +437,7 @@ const Terminal = {
           btn.className = `order-submit-btn ${this.orderSide === 'buy' ? 'buy-btn' : 'sell-btn'}`;
           btn.textContent = `${this.orderSide === 'buy' ? '🟢 BUY' : '🔴 SELL'} ${this.selectedTicker}`;
         }
+        this.updateOrderPreview();
       });
     });
 
@@ -449,7 +463,7 @@ const Terminal = {
       const pct = parseFloat(e.target.dataset.pct) / 100;
       const t = this.priceCache[this.selectedTicker] || this.tickers[this.selectedTicker] || {};
       const price = t.price || t.ask || 1;
-      const cash = App.user?.cash || 0;
+      const cash = Utils.toNumber(App.user?.cash, 0);
       const maxQty = Math.floor(cash / price);
       const qty = Math.max(1, Math.floor(maxQty * pct));
       const qtyEl = document.getElementById('order-qty');
@@ -596,7 +610,7 @@ const Terminal = {
     const type = document.getElementById('order-type')?.value;
     const t = this.priceCache[this.selectedTicker] || this.tickers[this.selectedTicker] || {};
     const price = t.price || 0;
-    const cash = App.user?.cash || 0;
+    const cash = Utils.toNumber(App.user?.cash, 0);
 
     // Use limit price for limit orders, otherwise market price
     let execPrice = price;
@@ -619,6 +633,94 @@ const Terminal = {
     if (el('qi-max')) {
       const maxQty = price > 0 ? Math.floor(cash / price) : 0;
       el('qi-max').textContent = maxQty;
+    }
+    this.updateExecutionEstimate({
+      qty,
+      execPrice,
+      marketPrice: price,
+      type,
+      cash,
+    });
+  },
+
+  updateExecutionEstimate({ qty, execPrice, marketPrice, type, cash }) {
+    const def = this.tickers[this.selectedTicker] || {};
+    const tick = this.priceCache[this.selectedTicker] || def || {};
+    const el = (id) => document.getElementById(id);
+
+    if (!qty || qty <= 0 || !Number.isFinite(execPrice) || execPrice <= 0) {
+      this.executionEstimate = null;
+      if (el('ee-regime')) el('ee-regime').textContent = '--';
+      if (el('ee-slippage')) el('ee-slippage').textContent = '--';
+      if (el('ee-commission')) el('ee-commission').textContent = '--';
+      if (el('ee-borrow')) el('ee-borrow').textContent = '--';
+      if (el('ee-total')) el('ee-total').textContent = '--';
+      if (el('ee-quality')) el('ee-quality').textContent = '--';
+      return;
+    }
+
+    const mid = tick.bid && tick.ask
+      ? (Number(tick.bid) + Number(tick.ask)) / 2
+      : (Number(marketPrice || execPrice) || execPrice);
+    const orderNotional = qty * execPrice;
+    const addv = Math.max(1, Number(def.avg_daily_dollar_volume || 1_000_000_000));
+    const baseSpreadBps = Number(def.base_spread_bps || def.spread_bps || 2);
+    const impactCoeff = Number(def.impact_coeff || 60);
+    const volatility = Math.max(0, Number(tick.volatility || 0));
+    const volatilityMult = Math.max(0.85, Math.min(4, 1 + (volatility * 25)));
+    const regimeName = String(tick.regime || def.regime || 'normal');
+    const regimeMult = regimeName === 'event_shock'
+      ? { liq: 2.1, borrow: 1.5 }
+      : regimeName === 'high_volatility'
+        ? { liq: 1.2, borrow: 1.25 }
+        : regimeName === 'tight_liquidity'
+          ? { liq: 1.45, borrow: 1.2 }
+          : { liq: 1.0, borrow: 1.0 };
+    const impactBps = baseSpreadBps + (impactCoeff * ((orderNotional / addv) ** 0.6) * regimeMult.liq * volatilityMult);
+    const direction = this.orderSide === 'sell' ? -1 : 1;
+    const estFillPrice = execPrice * (1 + ((impactBps / 10000) * direction));
+    const slippageCost = this.orderSide === 'buy'
+      ? Math.max(0, (estFillPrice - mid) * qty)
+      : Math.max(0, (mid - estFillPrice) * qty);
+    const commissionBps = Number(def.commission_bps || 1);
+    const commissionMin = Number(def.commission_min_usd || 0.01);
+    const commission = Math.max(commissionMin, orderNotional * (commissionBps / 10000));
+    const currentPosition = this.positions.find((p) => p.ticker === this.selectedTicker);
+    const longInventory = Math.max(0, Number(currentPosition?.qty || 0));
+    const opensShortQty = this.orderSide === 'sell' ? Math.max(0, qty - longInventory) : 0;
+    const borrowApr = Number(def.borrow_apr_short || 0);
+    const borrowDay = opensShortQty > 0
+      ? (opensShortQty * estFillPrice) * ((borrowApr * regimeMult.borrow) / 365)
+      : 0;
+    const totalCost = slippageCost + commission + borrowDay;
+    const commissionCostBps = orderNotional > 0 ? (commission / orderNotional) * 10000 : 0;
+    const borrowCostBps = orderNotional > 0 ? (borrowDay / orderNotional) * 10000 : 0;
+    const quality = Math.max(0, Math.min(100, 100 - ((impactBps * 0.6) + (commissionCostBps * 0.3) + (borrowCostBps * 0.1))));
+
+    this.executionEstimate = {
+      est_slippage_bps: impactBps,
+      est_slippage_cost: slippageCost,
+      est_commission: commission,
+      est_borrow_day: borrowDay,
+      est_total_cost: totalCost,
+      est_execution_quality_score: quality,
+      regime: regimeName,
+      est_fill_price: estFillPrice,
+    };
+
+    if (el('ee-regime')) el('ee-regime').textContent = regimeName;
+    if (el('ee-slippage')) el('ee-slippage').textContent = `${impactBps.toFixed(2)} bps (${Utils.money(slippageCost)})`;
+    if (el('ee-commission')) el('ee-commission').textContent = Utils.money(commission);
+    if (el('ee-borrow')) el('ee-borrow').textContent = Utils.money(borrowDay);
+    if (el('ee-total')) el('ee-total').textContent = Utils.money(totalCost);
+    if (el('ee-quality')) el('ee-quality').textContent = `${quality.toFixed(1)}/100`;
+
+    const bpAfter = this.orderSide === 'buy'
+      ? cash - (orderNotional + totalCost)
+      : cash + (orderNotional - totalCost);
+    if (el('preview-bp-after')) {
+      el('preview-bp-after').textContent = Utils.money(bpAfter);
+      el('preview-bp-after').className = `value ${bpAfter < 0 ? 'price-down' : ''}`;
     }
   },
 
@@ -654,7 +756,7 @@ const Terminal = {
       });
 
       Utils.showToast('info', 'Order Placed',
-        `${this.orderSide.toUpperCase()} ${qty} ${this.selectedTicker} (${type})`);
+        `${this.orderSide.toUpperCase()} ${qty} ${this.selectedTicker} (${type}) · Est Cost ${Utils.money(result?.estimated_execution?.est_total_cost || 0)}`);
 
       this.loadPortfolioData();
     } catch (e) {
@@ -700,8 +802,7 @@ const Terminal = {
       const user = await Utils.get('/me');
       if (user) {
         App.user = user;
-        const cashEl = document.getElementById('header-cash');
-        if (cashEl) cashEl.textContent = Utils.money(user.cash);
+        Utils.syncHeaderBalance(user.cash);
       }
     } catch (e) { /* silent */ }
   },
@@ -797,8 +898,7 @@ const Terminal = {
 
   onPortfolioUpdate(data) {
     if (data.cash !== undefined) {
-      const cashEl = document.getElementById('header-cash');
-      if (cashEl) cashEl.textContent = Utils.money(data.cash);
+      Utils.syncHeaderBalance(data.cash);
     }
   },
 

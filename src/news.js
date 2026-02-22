@@ -175,7 +175,11 @@ let lastDbErrorLogAt = 0;
 function scheduleNext() {
     // Randomized cadence (defaults are calmer than the original profile).
     const maxInterval = Math.max(NEWS_MAX_INTERVAL_MS, NEWS_MIN_INTERVAL_MS + 1);
-    nextNewsTime = Date.now() + (Math.random() * (maxInterval - NEWS_MIN_INTERVAL_MS) + NEWS_MIN_INTERVAL_MS);
+    const regime = engine.getCurrentRegime ? engine.getCurrentRegime() : { news_mult: 1, regime: 'normal' };
+    const newsMult = Math.max(0.25, Number(regime?.news_mult || 1));
+    const effectiveMin = Math.max(5000, Math.floor(NEWS_MIN_INTERVAL_MS / newsMult));
+    const effectiveMax = Math.max(effectiveMin + 1, Math.floor(maxInterval / newsMult));
+    nextNewsTime = Date.now() + (Math.random() * (effectiveMax - effectiveMin) + effectiveMin);
 }
 
 function logDbError(error) {
@@ -216,6 +220,7 @@ async function generateEvent() {
     const body = template.body(tickerDef);
     const [minImpact, maxImpact] = template.impactRange;
     const impact = (minImpact + Math.random() * (maxImpact - minImpact)) * NEWS_IMPACT_MULTIPLIER;
+    const currentRegime = engine.getCurrentRegime ? engine.getCurrentRegime() : { regime: 'normal' };
 
     // Apply price shocks
     for (const t of affectedTickers) {
@@ -245,8 +250,14 @@ async function generateEvent() {
         body,
         priceImpact: +(impact * 100).toFixed(2),
         severity: template.severity,
+        liquidity_shock: template.severity === 'high' || Math.abs(impact) >= 0.05,
+        regime: currentRegime?.regime || 'normal',
         firedAt: now,
     };
+
+    if (event.liquidity_shock && engine.triggerEventShock) {
+        await engine.triggerEventShock();
+    }
 
     try {
         await stmts.insertNews.run(eventId, event.ticker, event.type, headline, body, event.priceImpact, event.severity, now);

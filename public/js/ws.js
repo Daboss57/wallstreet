@@ -104,8 +104,11 @@ const WS = {
 
             case 'fill':
                 Utils.emit('fill', msg);
-                Utils.showToast('fill', 'Order Filled',
-                    `${msg.side.toUpperCase()} ${msg.qty} ${msg.ticker} @ $${msg.price.toFixed(2)}`);
+                Utils.showToast(
+                    'fill',
+                    'Order Filled',
+                    `${msg.side.toUpperCase()} ${msg.qty} ${msg.ticker} @ $${msg.price.toFixed(2)} | Slip ${Number(msg.slippage_bps || 0).toFixed(2)} bps | Comm ${Utils.money(msg.commission || 0)} | Borrow ${Utils.money(msg.borrow_cost || 0)} | Quality ${Number(msg.execution_quality_score || 0).toFixed(1)}`
+                );
                 break;
 
             case 'margin_call':

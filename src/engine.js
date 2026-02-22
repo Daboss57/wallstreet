@@ -1,9 +1,23 @@
+const { v4: uuid } = require('uuid');
 const { stmts, batchUpsertCandles, batchUpsertPriceStates, isDbUnavailableError } = require('./db');
+const { resolveMicrostructure } = require('./executionModel');
 
 function boundedFloat(value, fallback, min, max) {
     const parsed = Number.parseFloat(value);
     if (!Number.isFinite(parsed)) return fallback;
     return Math.max(min, Math.min(max, parsed));
+}
+
+function boundedInt(value, fallback, min, max) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+}
+
+function envBool(name, fallback = true) {
+    const raw = process.env[name];
+    if (raw === undefined) return fallback;
+    return ['1', 'true', 'yes', 'on'].includes(String(raw).toLowerCase());
 }
 
 function clamp(value, min, max) {
@@ -34,6 +48,9 @@ const MARKET_MAX_NEWS_MOVE_PCT = boundedFloat(process.env.MARKET_MAX_NEWS_MOVE_P
 const MARKET_MEAN_REVERSION_MULTIPLIER = boundedFloat(process.env.MARKET_MEAN_REVERSION_MULTIPLIER, 2.5, 0.2, 10.0);
 const MARKET_ORDER_FLOW_DECAY = boundedFloat(process.env.MARKET_ORDER_FLOW_DECAY, 0.25, 0.01, 0.95);
 const MARKET_MAX_ORDER_FLOW_MOVE_PCT = boundedFloat(process.env.MARKET_MAX_ORDER_FLOW_MOVE_PCT, 0.0015, 0.0001, 0.05);
+const MARKET_REGIME_ENABLED = envBool('MARKET_REGIME_ENABLED', true);
+const MARKET_REGIME_REVIEW_INTERVAL_MS = boundedInt(process.env.MARKET_REGIME_REVIEW_INTERVAL_MS, 4 * 60 * 1000, 60_000, 30 * 60 * 1000);
+const MARKET_EVENT_SHOCK_DURATION_MS = boundedInt(process.env.MARKET_EVENT_SHOCK_DURATION_MS, 3 * 60 * 1000, 30_000, 30 * 60 * 1000);
 
 function getRiskMultiplier(definition) {
     if (definition.class === 'Crypto') return 1.35;
@@ -110,7 +127,54 @@ const TICKERS = {
     USDJPY: { name: 'Dollar/Yen', class: 'Forex', sector: 'FX', basePrice: 150.50, volatility: 0.005, drift: 0.0, meanRev: 0.005 },
 };
 
+function computeLiquidityScore(avgDailyDollarVolume) {
+    const volume = Math.max(1, Number(avgDailyDollarVolume) || 1);
+    const logScale = Math.log10(volume);
+    const normalized = clamp((logScale - 6.5) / 3.5, 0, 1);
+    return Math.round(normalized * 100);
+}
+
+for (const [ticker, def] of Object.entries(TICKERS)) {
+    const micro = resolveMicrostructure(def);
+    TICKERS[ticker] = {
+        ...def,
+        ...micro,
+        liquidity_score: computeLiquidityScore(micro.avg_daily_dollar_volume),
+    };
+}
+
 const TICKER_LIST = Object.keys(TICKERS);
+
+const REGIME_PROFILES = {
+    normal: {
+        regime: 'normal',
+        liquidity_mult: 1.0,
+        vol_mult: 1.0,
+        news_mult: 1.0,
+        borrow_mult: 1.0,
+    },
+    tight_liquidity: {
+        regime: 'tight_liquidity',
+        liquidity_mult: 1.45,
+        vol_mult: 1.15,
+        news_mult: 1.1,
+        borrow_mult: 1.2,
+    },
+    high_volatility: {
+        regime: 'high_volatility',
+        liquidity_mult: 1.2,
+        vol_mult: 1.5,
+        news_mult: 1.2,
+        borrow_mult: 1.25,
+    },
+    event_shock: {
+        regime: 'event_shock',
+        liquidity_mult: 2.1,
+        vol_mult: 2.0,
+        news_mult: 1.55,
+        borrow_mult: 1.5,
+    },
+};
 
 const MARKET_FACTOR_NAMES = ['riskOn', 'usd', 'rates', 'energy', 'metals', 'crypto', 'vol'];
 const marketFactors = {
@@ -392,6 +456,14 @@ let tickCallback = null;  // set by wsServer to broadcast ticks
 let paused = false;
 let tickInFlight = false;
 let lastDbWriteErrorLogAt = 0;
+let nextRegimeTransitionAt = 0;
+let forcedEventShockUntil = 0;
+let currentRegime = {
+    ...REGIME_PROFILES.normal,
+    id: null,
+    started_at: Date.now(),
+    ended_at: null,
+};
 
 // ─── Gaussian random via Box-Muller ────────────────────────────────────────────
 function gaussianRandom() {
@@ -470,6 +542,130 @@ function initCandleBuffers(ticker, now) {
     }
 }
 
+function getRegimeProfile(regimeName) {
+    return REGIME_PROFILES[regimeName] || REGIME_PROFILES.normal;
+}
+
+function getCurrentRegime() {
+    return { ...currentRegime };
+}
+
+function scheduleNextRegimeTransition(now = Date.now()) {
+    const jitter = 0.8 + (Math.random() * 0.4);
+    nextRegimeTransitionAt = now + Math.floor(MARKET_REGIME_REVIEW_INTERVAL_MS * jitter);
+}
+
+function pickScheduledRegime() {
+    const roll = Math.random();
+    if (roll < 0.62) return 'normal';
+    if (roll < 0.8) return 'tight_liquidity';
+    if (roll < 0.96) return 'high_volatility';
+    return 'event_shock';
+}
+
+async function setMarketRegime(regimeName, now = Date.now()) {
+    const profile = getRegimeProfile(regimeName);
+    const hasChanged = currentRegime.regime !== profile.regime;
+    if (!hasChanged) return currentRegime;
+
+    currentRegime = {
+        ...profile,
+        id: uuid(),
+        started_at: now,
+        ended_at: null,
+    };
+
+    if (!MARKET_REGIME_ENABLED) return currentRegime;
+
+    try {
+        await stmts.closeActiveMarketRegime.run(now);
+        await stmts.insertMarketRegime.run(
+            currentRegime.id,
+            currentRegime.regime,
+            currentRegime.liquidity_mult,
+            currentRegime.vol_mult,
+            currentRegime.news_mult,
+            currentRegime.borrow_mult,
+            now,
+            null
+        );
+    } catch (error) {
+        if (!isDbUnavailableError(error)) {
+            console.error('[Engine] Market regime persist failed:', error.message);
+        }
+    }
+    return currentRegime;
+}
+
+async function initMarketRegime(now = Date.now()) {
+    if (!MARKET_REGIME_ENABLED) {
+        currentRegime = {
+            ...REGIME_PROFILES.normal,
+            id: 'legacy',
+            started_at: now,
+            ended_at: null,
+        };
+        scheduleNextRegimeTransition(now);
+        return;
+    }
+
+    try {
+        const active = await stmts.getActiveMarketRegime.get();
+        if (active) {
+            currentRegime = {
+                regime: active.regime,
+                liquidity_mult: Number(active.liquidity_mult || 1),
+                vol_mult: Number(active.vol_mult || 1),
+                news_mult: Number(active.news_mult || 1),
+                borrow_mult: Number(active.borrow_mult || 1),
+                id: active.id,
+                started_at: Number(active.started_at || now),
+                ended_at: active.ended_at ? Number(active.ended_at) : null,
+            };
+            scheduleNextRegimeTransition(now);
+            return;
+        }
+    } catch (error) {
+        if (!isDbUnavailableError(error)) {
+            console.error('[Engine] Failed to restore market regime:', error.message);
+        }
+    }
+
+    await setMarketRegime('normal', now);
+    scheduleNextRegimeTransition(now);
+}
+
+async function maybeTransitionRegime(now = Date.now()) {
+    if (!MARKET_REGIME_ENABLED) return currentRegime;
+
+    if (forcedEventShockUntil > now) {
+        if (currentRegime.regime !== 'event_shock') {
+            await setMarketRegime('event_shock', now);
+        }
+        return currentRegime;
+    }
+
+    if (currentRegime.regime === 'event_shock' && forcedEventShockUntil <= now) {
+        await setMarketRegime('normal', now);
+        scheduleNextRegimeTransition(now);
+        return currentRegime;
+    }
+
+    if (nextRegimeTransitionAt > now) return currentRegime;
+
+    const nextRegime = pickScheduledRegime();
+    await setMarketRegime(nextRegime, now);
+    scheduleNextRegimeTransition(now);
+    return currentRegime;
+}
+
+async function triggerEventShock(durationMs = MARKET_EVENT_SHOCK_DURATION_MS) {
+    const now = Date.now();
+    forcedEventShockUntil = Math.max(forcedEventShockUntil, now + Math.max(30_000, Number(durationMs) || MARKET_EVENT_SHOCK_DURATION_MS));
+    if (!MARKET_REGIME_ENABLED) return;
+    await setMarketRegime('event_shock', now);
+}
+
 // ─── Core Tick Function ────────────────────────────────────────────────────────
 function logDbWriteError(prefix, error) {
     const now = Date.now();
@@ -487,6 +683,8 @@ async function tick() {
     const candlesToSave = [];
     const priceStates = [];
     updateMarketFactors(now);
+    await maybeTransitionRegime(now);
+    const regime = getCurrentRegime();
 
     for (const ticker of TICKER_LIST) {
         const def = TICKERS[ticker];
@@ -512,6 +710,7 @@ async function tick() {
         );
         const sessionVolScale = 1 + ((sessionVolMult - 1) * 0.35);
         state.volatility *= sessionVolScale;
+        state.volatility *= regime.vol_mult;
         state.volatility = clamp(state.volatility, volRange.minVolatility, volRange.maxVolatility);
 
         // ── Factor + regime + idiosyncratic move ──
@@ -548,7 +747,12 @@ async function tick() {
         state.lastReturn = oldPrice > 0 ? Math.log(newPrice / oldPrice) : 0;
 
         // ── Update spread ──
-        const spread = newPrice * state.volatility * 0.05 * MARKET_SPREAD_MULTIPLIER * (style.spreadMult || 1);
+        const spread = newPrice
+            * state.volatility
+            * 0.05
+            * MARKET_SPREAD_MULTIPLIER
+            * (style.spreadMult || 1)
+            * regime.liquidity_mult;
         state.price = +newPrice.toFixed(getDecimals(ticker));
         state.bid = +(newPrice - spread / 2).toFixed(getDecimals(ticker));
         state.ask = +(newPrice + spread / 2).toFixed(getDecimals(ticker));
@@ -607,6 +811,7 @@ async function tick() {
             change: +change.toFixed(getDecimals(ticker)),
             changePct: +changePct.toFixed(2),
             volatility: +state.volatility.toFixed(6),
+            regime: regime.regime,
             timestamp: now
         });
 
@@ -684,6 +889,14 @@ function applyNewsShock(ticker, impactPct) {
     // Spike volatility
     const volRange = getVolatilityRange(def);
     state.volatility = Math.min(state.volatility * MARKET_NEWS_VOL_SPIKE_MULTIPLIER, volRange.maxVolatility);
+
+    if (Math.abs(boundedImpactPct) >= 0.015) {
+        triggerEventShock().catch((error) => {
+            if (!isDbUnavailableError(error)) {
+                console.error('[Engine] Failed to trigger event shock:', error.message);
+            }
+        });
+    }
 }
 
 function getPrice(ticker) {
@@ -715,6 +928,7 @@ let engineInterval = null;
 
 async function start() {
     await initPrices();
+    await initMarketRegime();
     console.log(`[Engine] Initialized ${TICKER_LIST.length} tickers`);
     engineInterval = setInterval(() => {
         if (paused || tickInFlight) return;
@@ -767,6 +981,15 @@ async function stop() {
             console.error('[Engine] Final state save failed:', error.message);
         }
     }
+    if (MARKET_REGIME_ENABLED) {
+        try {
+            await stmts.closeActiveMarketRegime.run(Date.now());
+        } catch (error) {
+            if (!isDbUnavailableError(error)) {
+                console.error('[Engine] Failed to close active market regime:', error.message);
+            }
+        }
+    }
     console.log('[Engine] Stopped — final state saved');
 }
 
@@ -776,6 +999,7 @@ module.exports = {
     pause, resume, isPaused,
     getPrice, getAllPrices, getTickerDef, getAllTickerDefs,
     getCurrentCandle, addOrderFlowImpact, applyNewsShock,
+    getCurrentRegime, triggerEventShock,
     setTickCallback, setNewsCallback, getNewsCallback,
     getDecimals
 };

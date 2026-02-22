@@ -13,8 +13,8 @@ const Account = {
 
         const profile = this.profile || App.user || {};
         const stats = this.stats || {};
-        const totalValue = Number(stats.totalValue || profile.cash || 0);
-        const startingCash = Number(profile.starting_cash ?? 100000);
+        const totalValue = Utils.toNumber(stats.totalValue, Utils.toNumber(profile.cash, 0));
+        const startingCash = Utils.toNumber(profile.starting_cash, 100000);
         const pnlValue = +(totalValue - startingCash).toFixed(2);
         const allTimeReturn = Number.isFinite(stats.allTimeReturn)
             ? Number(stats.allTimeReturn)
@@ -82,6 +82,7 @@ const Account = {
 
             <section class="account-card">
               <h3>Recent Trades</h3>
+              ${this.renderExecutionCostSummary()}
               ${this.renderTrades()}
             </section>
           </div>
@@ -96,7 +97,7 @@ const Account = {
         const [profileResult, statsResult, tradesResult, fundsResult] = await Promise.allSettled([
             Utils.get('/me'),
             Utils.get('/portfolio/stats'),
-            Utils.get('/trades?limit=20'),
+            Utils.get('/trades?limit=200'),
             Utils.get('/funds/my'),
         ]);
 
@@ -201,6 +202,42 @@ const Account = {
           `).join('')}
         </tbody>
       </table>
+    `;
+    },
+
+    renderExecutionCostSummary() {
+        if (!this.trades.length) return '';
+
+        const monthStart = new Date();
+        monthStart.setUTCDate(1);
+        monthStart.setUTCHours(0, 0, 0, 0);
+        const monthStartTs = monthStart.getTime();
+        const monthTrades = this.trades.filter((t) => Number(t.executed_at || 0) >= monthStartTs);
+        const sumField = (rows, field) => rows.reduce((sum, row) => sum + Number(row[field] || 0), 0);
+        const monthSlippage = sumField(monthTrades, 'slippage_cost');
+        const monthCommission = sumField(monthTrades, 'commission');
+        const monthBorrow = sumField(monthTrades, 'borrow_cost');
+        const monthTotal = monthSlippage + monthCommission + monthBorrow;
+
+        return `
+      <div class="portfolio-analytics" style="margin-bottom:14px">
+        <div class="portfolio-stat-card">
+          <div class="psc-label">Month Slippage</div>
+          <div class="psc-value price-down">${Utils.money(monthSlippage)}</div>
+        </div>
+        <div class="portfolio-stat-card">
+          <div class="psc-label">Month Commission</div>
+          <div class="psc-value price-down">${Utils.money(monthCommission)}</div>
+        </div>
+        <div class="portfolio-stat-card">
+          <div class="psc-label">Month Borrow</div>
+          <div class="psc-value price-down">${Utils.money(monthBorrow)}</div>
+        </div>
+        <div class="portfolio-stat-card">
+          <div class="psc-label">Month Total Cost</div>
+          <div class="psc-value">${Utils.money(monthTotal)}</div>
+        </div>
+      </div>
     `;
     },
 

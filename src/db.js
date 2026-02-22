@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS positions (
   opened_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint),
   UNIQUE(user_id, ticker)
 );
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS accrued_borrow_cost DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS last_borrow_accrual_at BIGINT;
 
 CREATE TABLE IF NOT EXISTS orders (
   id TEXT PRIMARY KEY,
@@ -63,6 +65,13 @@ CREATE TABLE IF NOT EXISTS trades (
   pnl DOUBLE PRECISION DEFAULT 0,
   executed_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint)
 );
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS mid_price DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS slippage_bps DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS slippage_cost DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS commission DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS borrow_cost DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS execution_quality_score DOUBLE PRECISION NOT NULL DEFAULT 100;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS regime TEXT;
 
 CREATE TABLE IF NOT EXISTS candles (
   ticker TEXT NOT NULL,
@@ -221,6 +230,24 @@ CREATE TABLE IF NOT EXISTS strategy_trades (
 ALTER TABLE strategy_trades
   ALTER COLUMN price TYPE DOUBLE PRECISION
   USING price::DOUBLE PRECISION;
+ALTER TABLE strategy_trades ADD COLUMN IF NOT EXISTS mid_price DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE strategy_trades ADD COLUMN IF NOT EXISTS slippage_bps DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE strategy_trades ADD COLUMN IF NOT EXISTS slippage_cost DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE strategy_trades ADD COLUMN IF NOT EXISTS commission DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE strategy_trades ADD COLUMN IF NOT EXISTS borrow_cost DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE strategy_trades ADD COLUMN IF NOT EXISTS execution_quality_score DOUBLE PRECISION NOT NULL DEFAULT 100;
+ALTER TABLE strategy_trades ADD COLUMN IF NOT EXISTS regime TEXT;
+
+CREATE TABLE IF NOT EXISTS market_regimes (
+  id TEXT PRIMARY KEY,
+  regime TEXT NOT NULL,
+  liquidity_mult DOUBLE PRECISION NOT NULL DEFAULT 1,
+  vol_mult DOUBLE PRECISION NOT NULL DEFAULT 1,
+  news_mult DOUBLE PRECISION NOT NULL DEFAULT 1,
+  borrow_mult DOUBLE PRECISION NOT NULL DEFAULT 1,
+  started_at BIGINT NOT NULL DEFAULT ((extract(epoch from now()) * 1000)::bigint),
+  ended_at BIGINT
+);
 
 CREATE TABLE IF NOT EXISTS strategy_backtests (
   id TEXT PRIMARY KEY,
@@ -257,6 +284,8 @@ CREATE INDEX IF NOT EXISTS idx_strategy_trades_strategy ON strategy_trades(strat
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_ticker ON strategy_trades(ticker);
 CREATE INDEX IF NOT EXISTS idx_strategy_backtests_strategy_time ON strategy_backtests(strategy_id, ran_at DESC);
 CREATE INDEX IF NOT EXISTS idx_strategy_backtests_fund_time ON strategy_backtests(fund_id, ran_at DESC);
+CREATE INDEX IF NOT EXISTS idx_market_regimes_started ON market_regimes(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_market_regimes_active ON market_regimes(ended_at);
 `;
 
 const SQL = {
@@ -269,12 +298,14 @@ const SQL = {
     getUserPositions: 'SELECT * FROM positions WHERE user_id = $1',
     getAllPositions: 'SELECT * FROM positions',
     upsertPosition: `
-        INSERT INTO positions (id, user_id, ticker, qty, avg_cost, opened_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO positions (id, user_id, ticker, qty, avg_cost, opened_at, accrued_borrow_cost, last_borrow_accrual_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT(user_id, ticker) DO UPDATE SET
             qty = EXCLUDED.qty,
             avg_cost = EXCLUDED.avg_cost,
-            opened_at = EXCLUDED.opened_at
+            opened_at = EXCLUDED.opened_at,
+            accrued_borrow_cost = EXCLUDED.accrued_borrow_cost,
+            last_borrow_accrual_at = EXCLUDED.last_borrow_accrual_at
     `,
     deletePosition: 'DELETE FROM positions WHERE user_id = $1 AND ticker = $2',
     insertOrder: `
@@ -291,8 +322,14 @@ const SQL = {
     cancelOcoOrders: "UPDATE orders SET status = 'cancelled', cancelled_at = $1 WHERE oco_id = $2 AND id != $3 AND status = 'open'",
     getOrderById: 'SELECT * FROM orders WHERE id = $1',
     insertTrade: `
-        INSERT INTO trades (id, order_id, user_id, ticker, side, qty, price, total, pnl, executed_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO trades (
+            id, order_id, user_id, ticker, side, qty, price, total, pnl, executed_at,
+            mid_price, slippage_bps, slippage_cost, commission, borrow_cost, execution_quality_score, regime
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+            $11, $12, $13, $14, $15, $16, $17
+        )
     `,
     getUserTrades: 'SELECT * FROM trades WHERE user_id = $1 ORDER BY executed_at DESC LIMIT $2',
     getAllTrades: 'SELECT * FROM trades ORDER BY user_id, executed_at DESC',
@@ -412,10 +449,26 @@ const SQL = {
     deleteStrategy: 'DELETE FROM strategies WHERE id = $1',
 
     // Strategy Trade CRUD
-    insertStrategyTrade: 'INSERT INTO strategy_trades (id, strategy_id, ticker, side, quantity, price, executed_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+    insertStrategyTrade: `
+        INSERT INTO strategy_trades (
+            id, strategy_id, ticker, side, quantity, price, executed_at,
+            mid_price, slippage_bps, slippage_cost, commission, borrow_cost, execution_quality_score, regime
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11, $12, $13, $14
+        )
+    `,
     getAllStrategyTradesChrono: 'SELECT * FROM strategy_trades ORDER BY executed_at ASC, id ASC',
     getStrategyTrades: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 ORDER BY executed_at DESC LIMIT $2',
     getStrategyTradesByTicker: 'SELECT * FROM strategy_trades WHERE strategy_id = $1 AND ticker = $2 ORDER BY executed_at DESC',
+    getFundStrategyTrades: `
+        SELECT st.*
+        FROM strategy_trades st
+        JOIN strategies s ON s.id = st.strategy_id
+        WHERE s.fund_id = $1
+        ORDER BY st.executed_at DESC
+        LIMIT $2
+    `,
     deleteStrategyTrades: 'DELETE FROM strategy_trades WHERE strategy_id = $1',
     insertStrategyBacktest: `
         INSERT INTO strategy_backtests (id, strategy_id, fund_id, config_hash, config_snapshot, metrics, thresholds, passed, notes, ran_at)
@@ -425,6 +478,15 @@ const SQL = {
     getLatestStrategyBacktest: 'SELECT * FROM strategy_backtests WHERE strategy_id = $1 ORDER BY ran_at DESC LIMIT 1',
     deleteStrategyBacktests: 'DELETE FROM strategy_backtests WHERE strategy_id = $1',
     deleteFundStrategyBacktests: 'DELETE FROM strategy_backtests WHERE fund_id = $1',
+
+    // Market regime lifecycle
+    insertMarketRegime: `
+        INSERT INTO market_regimes (id, regime, liquidity_mult, vol_mult, news_mult, borrow_mult, started_at, ended_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `,
+    closeActiveMarketRegime: 'UPDATE market_regimes SET ended_at = $1 WHERE ended_at IS NULL',
+    getActiveMarketRegime: 'SELECT * FROM market_regimes WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1',
+    getRecentMarketRegimes: 'SELECT * FROM market_regimes ORDER BY started_at DESC LIMIT $1',
 
     // Custom Strategy CRUD
     insertCustomStrategy: 'INSERT INTO custom_strategies (id, fund_id, name, code, parameters, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
@@ -573,12 +635,19 @@ const stmts = {
     getAllStrategyTradesChrono: makeStatement('getAllStrategyTradesChrono', SQL.getAllStrategyTradesChrono),
     getStrategyTrades: makeStatement('getStrategyTrades', SQL.getStrategyTrades),
     getStrategyTradesByTicker: makeStatement('getStrategyTradesByTicker', SQL.getStrategyTradesByTicker),
+    getFundStrategyTrades: makeStatement('getFundStrategyTrades', SQL.getFundStrategyTrades),
     deleteStrategyTrades: makeStatement('deleteStrategyTrades', SQL.deleteStrategyTrades),
     insertStrategyBacktest: makeStatement('insertStrategyBacktest', SQL.insertStrategyBacktest),
     getStrategyBacktests: makeStatement('getStrategyBacktests', SQL.getStrategyBacktests),
     getLatestStrategyBacktest: makeStatement('getLatestStrategyBacktest', SQL.getLatestStrategyBacktest),
     deleteStrategyBacktests: makeStatement('deleteStrategyBacktests', SQL.deleteStrategyBacktests),
     deleteFundStrategyBacktests: makeStatement('deleteFundStrategyBacktests', SQL.deleteFundStrategyBacktests),
+
+    // Market regime lifecycle
+    insertMarketRegime: makeStatement('insertMarketRegime', SQL.insertMarketRegime),
+    closeActiveMarketRegime: makeStatement('closeActiveMarketRegime', SQL.closeActiveMarketRegime),
+    getActiveMarketRegime: makeStatement('getActiveMarketRegime', SQL.getActiveMarketRegime),
+    getRecentMarketRegimes: makeStatement('getRecentMarketRegimes', SQL.getRecentMarketRegimes),
 
     // Custom Strategy CRUD
     insertCustomStrategy: makeStatement('insertCustomStrategy', SQL.insertCustomStrategy),

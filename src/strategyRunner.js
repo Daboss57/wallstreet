@@ -5,6 +5,14 @@ const { meanReversionStrategy } = require('./strategies/meanReversion');
 const { momentumStrategy } = require('./strategies/momentum');
 const gridStrategy = require('./strategies/grid');
 const pairsStrategy = require('./strategies/pairs');
+const { summarizeTradeLifecycle } = require('./metrics/fundMetrics');
+const {
+    estimateExecution,
+    recordFillMetrics,
+    isExecutionRealismEnabled,
+} = require('./executionModel');
+const DEBUG_EXECUTION_DIAGNOSTICS = ['1', 'true', 'yes', 'on']
+    .includes(String(process.env.DEBUG_EXECUTION_DIAGNOSTICS || 'false').toLowerCase());
 
 // ─── In-memory state ────────────────────────────────────────────────────────
 const strategyStates = new Map(); // strategyId → { trades, pnl, positions, signals }
@@ -376,6 +384,9 @@ function getOrCreateState(strategyId) {
             winCount: 0,
             lossCount: 0,
             breakevenCount: 0,
+            totalSlippageCost: 0,
+            totalCommission: 0,
+            totalBorrowCost: 0,
             lastSignal: null,
             lastRunAt: 0,
         });
@@ -461,6 +472,9 @@ async function hydrateStateFromDb() {
         const state = getOrCreateState(row.strategy_id);
         updatePosition(state, row.ticker, side, qty, price);
         state.tradeCount += 1;
+        state.totalSlippageCost += Number(row.slippage_cost || 0);
+        state.totalCommission += Number(row.commission || 0);
+        state.totalBorrowCost += Number(row.borrow_cost || 0);
         state.lastSignal = side;
         state.lastRunAt = Math.max(Number(state.lastRunAt || 0), executedAt || 0);
 
@@ -470,6 +484,12 @@ async function hydrateStateFromDb() {
             side,
             quantity: qty,
             price,
+            slippage_bps: Number(row.slippage_bps || 0),
+            slippage_cost: Number(row.slippage_cost || 0),
+            commission: Number(row.commission || 0),
+            borrow_cost: Number(row.borrow_cost || 0),
+            execution_quality_score: Number(row.execution_quality_score || 100),
+            regime: row.regime || 'normal',
             executed_at: executedAt || Date.now(),
             strategy_name: strategy.name,
         });
@@ -620,24 +640,46 @@ async function executeStrategy(strategy) {
     const priceData = engine.getPrice(ticker);
     if (!priceData) return;
 
-    const price = signal === 'buy' ? Number(priceData.ask) : Number(priceData.bid);
-    if (!Number.isFinite(price) || price <= 0) return;
+    const referencePrice = signal === 'buy' ? Number(priceData.ask) : Number(priceData.bid);
+    if (!Number.isFinite(referencePrice) || referencePrice <= 0) return;
     const side = signal;
     let qty = Number.isFinite(Number(result.qty)) && Number(result.qty) > 0
         ? Math.max(1, Math.floor(Number(result.qty)))
         : 0;
     if (!qty) {
-        const sizing = await resolveStrategyTradeSizing(strategy, config, price);
+        const sizing = await resolveStrategyTradeSizing(strategy, config, referencePrice);
         qty = sizing.qty;
     }
     if (!Number.isFinite(qty) || qty <= 0) return;
+
+    const positionQty = Number(state.positions?.[ticker]?.qty || 0);
+    const longInventory = Math.max(0, positionQty);
+    const opensShortQty = side === 'sell'
+        ? Math.max(0, qty - longInventory)
+        : 0;
+    const regime = engine.getCurrentRegime ? engine.getCurrentRegime() : null;
+    const midPrice = (Number(priceData.bid || referencePrice) + Number(priceData.ask || referencePrice)) / 2;
+    const execution = estimateExecution({
+        tickerDef: engine.getTickerDef(ticker) || {},
+        side,
+        qty,
+        reference_price: referencePrice,
+        mid_price: Number.isFinite(midPrice) && midPrice > 0 ? midPrice : referencePrice,
+        volatility: Number(priceData.volatility || 0),
+        regime,
+        opens_short_qty: opensShortQty,
+        apply_realism: isExecutionRealismEnabled(),
+    });
+    const executionPrice = Number(execution.fill_price || referencePrice);
+    if (!Number.isFinite(executionPrice) || executionPrice <= 0) return;
+
     const now = Date.now();
     const tradeId = uuid();
 
     try {
-        const riskCheck = await evaluateRiskGuards(strategy, state, side, ticker, qty, price);
+        const riskCheck = await evaluateRiskGuards(strategy, state, side, ticker, qty, executionPrice);
         if (!riskCheck.allowed) {
-            await recordRiskBreach(strategy, state, ticker, side, qty, price, riskCheck);
+            await recordRiskBreach(strategy, state, ticker, side, qty, executionPrice, riskCheck);
             return;
         }
     } catch (err) {
@@ -648,7 +690,20 @@ async function executeStrategy(strategy) {
     // Record to DB
     try {
         await stmts.insertStrategyTrade.run(
-            tradeId, strategy.id, ticker, side, qty, price, now
+            tradeId,
+            strategy.id,
+            ticker,
+            side,
+            qty,
+            executionPrice,
+            now,
+            Number(execution.mid_price || referencePrice),
+            Number(execution.slippage_bps || 0),
+            Number(execution.slippage_cost || 0),
+            Number(execution.commission || 0),
+            Number(execution.borrow_cost || 0),
+            Number(execution.execution_quality_score || 100),
+            execution.regime || 'normal'
         );
     } catch (err) {
         if (!isDbUnavailableError(err)) {
@@ -658,17 +713,56 @@ async function executeStrategy(strategy) {
     }
 
     // Update in-memory state
-    const trade = { id: tradeId, ticker, side, quantity: qty, price, executed_at: now, strategy_name: strategy.name };
+    const trade = {
+        id: tradeId,
+        ticker,
+        side,
+        quantity: qty,
+        price: executionPrice,
+        slippage_bps: Number(execution.slippage_bps || 0),
+        slippage_cost: Number(execution.slippage_cost || 0),
+        commission: Number(execution.commission || 0),
+        borrow_cost: Number(execution.borrow_cost || 0),
+        execution_quality_score: Number(execution.execution_quality_score || 100),
+        regime: execution.regime || 'normal',
+        executed_at: now,
+        strategy_name: strategy.name,
+    };
     state.trades.unshift(trade);
     if (state.trades.length > MAX_MEMORY_TRADES) state.trades.length = MAX_MEMORY_TRADES;
     state.tradeCount++;
+    state.totalSlippageCost += Number(execution.slippage_cost || 0);
+    state.totalCommission += Number(execution.commission || 0);
+    state.totalBorrowCost += Number(execution.borrow_cost || 0);
+    recordFillMetrics({
+        timestamp: now,
+        slippage_bps: Number(execution.slippage_bps || 0),
+        execution_quality_score: Number(execution.execution_quality_score || 100),
+    });
+    if (DEBUG_EXECUTION_DIAGNOSTICS) {
+        console.debug('[ExecutionDiagnostics:Strategy]', {
+            strategy_id: strategy.id,
+            fund_id: strategy.fund_id,
+            ticker,
+            side,
+            qty,
+            fill_price: executionPrice,
+            mid_price: Number(execution.mid_price || referencePrice),
+            slippage_bps: Number(execution.slippage_bps || 0),
+            slippage_cost: Number(execution.slippage_cost || 0),
+            commission: Number(execution.commission || 0),
+            borrow_cost: Number(execution.borrow_cost || 0),
+            execution_quality_score: Number(execution.execution_quality_score || 100),
+            regime: execution.regime || 'normal',
+        });
+    }
 
     // Update positions
-    updatePosition(state, ticker, side, qty, price);
+    updatePosition(state, ticker, side, qty, executionPrice, Number(execution.commission || 0) + Number(execution.borrow_cost || 0));
 }
 
 // ─── Position tracking ──────────────────────────────────────────────────────
-function updatePosition(state, ticker, side, qty, price) {
+function updatePosition(state, ticker, side, qty, price, tradeCosts = 0) {
     const pos = state.positions[ticker] || { qty: 0, avgEntry: 0, side: 'flat', totalCost: 0 };
 
     if (side === 'buy') {
@@ -731,6 +825,9 @@ function updatePosition(state, ticker, side, qty, price) {
     }
 
     state.positions[ticker] = pos;
+    if (Number.isFinite(Number(tradeCosts)) && Number(tradeCosts) > 0) {
+        state.realizedPnl -= Number(tradeCosts);
+    }
 }
 
 // ─── Main run loop ──────────────────────────────────────────────────────────
@@ -793,7 +890,9 @@ function setPaused(value) {
 function getDashboardData(fundId, strategies) {
     let totalRealized = 0;
     let totalUnrealized = 0;
-    let totalClosedTrades = 0;
+    let totalSlippageCost = 0;
+    let totalCommission = 0;
+    let totalBorrowCost = 0;
     let totalFills = 0;
     let totalWins = 0;
     let totalLosses = 0;
@@ -808,8 +907,18 @@ function getDashboardData(fundId, strategies) {
         if (!state) {
             perStrategy.push({
                 id: s.id, name: s.name, type: s.type, is_active: s.is_active,
-                tradeCount: 0, fillCount: 0, winCount: 0, lossCount: 0, breakevenCount: 0, realizedPnl: 0,
-                unrealizedPnl: 0, lastSignal: null, lastRunAt: 0,
+                tradeCount: 0, closedTradeCount: 0, fillCount: 0, nonClosingFills: 0,
+                resolvedTradeCount: 0, winRate: 0,
+                winCount: 0, lossCount: 0, breakevenCount: 0, realizedPnl: 0,
+                unrealizedPnl: 0,
+                grossPnl: 0,
+                netPnl: 0,
+                totalSlippageCost: 0,
+                totalCommission: 0,
+                totalBorrowCost: 0,
+                totalExecutionCost: 0,
+                costDragPct: 0,
+                lastSignal: null, lastRunAt: 0,
             });
             continue;
         }
@@ -835,13 +944,26 @@ function getDashboardData(fundId, strategies) {
         const strategyWins = Number(state.winCount || 0);
         const strategyLosses = Number(state.lossCount || 0);
         const strategyBreakevens = Number(state.breakevenCount || 0);
-        const strategyClosedTrades = strategyWins + strategyLosses + strategyBreakevens;
         const strategyFills = Number(state.tradeCount || 0);
+        const strategySlippage = Number(state.totalSlippageCost || 0);
+        const strategyCommission = Number(state.totalCommission || 0);
+        const strategyBorrow = Number(state.totalBorrowCost || 0);
+        const strategyTotalCost = strategySlippage + strategyCommission + strategyBorrow;
+        const strategyNetPnl = Number(state.realizedPnl || 0) + stratUnrealized;
+        const strategyGrossPnl = strategyNetPnl + strategyTotalCost;
+        const lifecycle = summarizeTradeLifecycle({
+            wins: strategyWins,
+            losses: strategyLosses,
+            breakevens: strategyBreakevens,
+            fills: strategyFills,
+        });
 
         totalRealized += state.realizedPnl;
         totalUnrealized += stratUnrealized;
-        totalClosedTrades += strategyClosedTrades;
-        totalFills += strategyFills;
+        totalSlippageCost += strategySlippage;
+        totalCommission += strategyCommission;
+        totalBorrowCost += strategyBorrow;
+        totalFills += lifecycle.fills;
         totalWins += strategyWins;
         totalLosses += strategyLosses;
         totalBreakevens += strategyBreakevens;
@@ -858,13 +980,26 @@ function getDashboardData(fundId, strategies) {
 
         perStrategy.push({
             id: s.id, name: s.name, type: s.type, is_active: s.is_active,
-            tradeCount: strategyClosedTrades,
-            fillCount: strategyFills,
+            tradeCount: lifecycle.closedTrades,
+            closedTradeCount: lifecycle.closedTrades,
+            fillCount: lifecycle.fills,
+            nonClosingFills: lifecycle.nonClosingFills,
+            resolvedTradeCount: lifecycle.resolvedTrades,
+            winRate: lifecycle.winRate,
             winCount: strategyWins,
             lossCount: strategyLosses,
             breakevenCount: strategyBreakevens,
             realizedPnl: state.realizedPnl,
             unrealizedPnl: stratUnrealized,
+            grossPnl: strategyGrossPnl,
+            netPnl: strategyNetPnl,
+            totalSlippageCost: strategySlippage,
+            totalCommission: strategyCommission,
+            totalBorrowCost: strategyBorrow,
+            totalExecutionCost: strategyTotalCost,
+            costDragPct: Math.abs(strategyGrossPnl) > 0
+                ? +((strategyTotalCost / Math.abs(strategyGrossPnl)) * 100).toFixed(2)
+                : 0,
             lastSignal: state.lastSignal,
             lastRunAt: state.lastRunAt,
         });
@@ -874,17 +1009,37 @@ function getDashboardData(fundId, strategies) {
     allTrades.sort((a, b) => b.executed_at - a.executed_at);
     allSignals.sort((a, b) => b.timestamp - a.timestamp);
 
-    const resolvedTrades = totalWins + totalLosses;
-    const winRate = resolvedTrades > 0 ? ((totalWins / resolvedTrades) * 100) : 0;
+    const summaryLifecycle = summarizeTradeLifecycle({
+        wins: totalWins,
+        losses: totalLosses,
+        breakevens: totalBreakevens,
+        fills: totalFills,
+    });
+
+    const netPnl = totalRealized + totalUnrealized;
+    const totalExecutionCost = totalSlippageCost + totalCommission + totalBorrowCost;
+    const grossPnl = netPnl + totalExecutionCost;
 
     return {
         summary: {
-            totalPnl: totalRealized + totalUnrealized,
+            totalPnl: netPnl,
             realizedPnl: totalRealized,
             unrealizedPnl: totalUnrealized,
-            totalTrades: totalClosedTrades,
-            totalFills,
-            winRate: +winRate.toFixed(1),
+            grossPnl,
+            netPnl,
+            totalSlippageCost,
+            totalCommission,
+            totalBorrowCost,
+            totalExecutionCost,
+            executionDragPct: Math.abs(grossPnl) > 0
+                ? +((totalExecutionCost / Math.abs(grossPnl)) * 100).toFixed(2)
+                : 0,
+            totalTrades: summaryLifecycle.fills,
+            totalFills: summaryLifecycle.fills,
+            closedTrades: summaryLifecycle.closedTrades,
+            resolvedTrades: summaryLifecycle.resolvedTrades,
+            nonClosingFills: summaryLifecycle.nonClosingFills,
+            winRate: summaryLifecycle.winRate,
             wins: totalWins,
             losses: totalLosses,
             breakevens: totalBreakevens,

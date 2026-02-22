@@ -220,12 +220,21 @@ const ClientPortal = {
 
         const returnClass = this.fundSummary.overall_return_pct >= 0 ? 'positive' : 'negative';
         const returnSign = this.fundSummary.overall_return_pct >= 0 ? '+' : '';
+        const execCostSummary = this.fundSummary.execution_cost_summary || {};
+        const trailingCost = Number(execCostSummary.total_execution_cost || 0);
+        const costDragPct = Number(this.fundSummary.total_aum || 0) > 0
+            ? (trailingCost / Number(this.fundSummary.total_aum || 0)) * 100
+            : 0;
 
         return `
             <div class="cp-summary-grid">
                 <div class="cp-summary-item">
                     <span class="cp-summary-label">Total AUM</span>
                     <span class="cp-summary-value">${Utils.money(this.fundSummary.total_aum)}</span>
+                </div>
+                <div class="cp-summary-item">
+                    <span class="cp-summary-label">Net Capital</span>
+                    <span class="cp-summary-value">${Utils.money(this.fundSummary.total_capital || 0)}</span>
                 </div>
                 <div class="cp-summary-item">
                     <span class="cp-summary-label">Members</span>
@@ -236,16 +245,16 @@ const ClientPortal = {
                     <span class="cp-summary-value">${this.fundSummary.client_count}</span>
                 </div>
                 <div class="cp-summary-item">
-                    <span class="cp-summary-label">Active Strategies</span>
-                    <span class="cp-summary-value">${this.fundSummary.active_strategies}</span>
-                </div>
-                <div class="cp-summary-item">
                     <span class="cp-summary-label">Fund Return</span>
                     <span class="cp-summary-value ${returnClass}">${returnSign}${this.fundSummary.overall_return_pct}%</span>
                 </div>
                 <div class="cp-summary-item">
-                    <span class="cp-summary-label">Strategy Type</span>
-                    <span class="cp-summary-value">${this.fundSummary.strategy_type.replace('_', ' ')}</span>
+                    <span class="cp-summary-label">Execution Cost (12m)</span>
+                    <span class="cp-summary-value">${Utils.money(trailingCost)}</span>
+                </div>
+                <div class="cp-summary-item">
+                    <span class="cp-summary-label">Fund Cost Drag</span>
+                    <span class="cp-summary-value">${Utils.num(costDragPct, 2)}%</span>
                 </div>
             </div>
             ${this.fundSummary.description ? `

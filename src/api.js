@@ -7,6 +7,16 @@ const orderbook = require('./orderbook');
 const strategyRunner = require('./strategyRunner');
 const backtester = require('./backtester');
 const clientPortal = require('./routes/clientPortal');
+const { estimateOrder, isExecutionRealismEnabled } = require('./executionModel');
+const {
+    round2,
+    round8,
+    normalizeCapitalTransactions,
+    normalizeNavSnapshots,
+    sumNetCapital,
+    sumUnits,
+    computeReconciliation,
+} = require('./metrics/fundMetrics');
 
 const router = express.Router();
 const MIN_ORDER_NOTIONAL = Math.max(1, Number.parseFloat(process.env.MIN_ORDER_NOTIONAL || '50'));
@@ -56,9 +66,13 @@ router.get('/me', authenticate, asyncRoute(async (req, res) => {
 router.get('/tickers', (req, res) => {
     const defs = engine.getAllTickerDefs();
     const prices = engine.getAllPrices();
+    const regime = engine.getCurrentRegime ? engine.getCurrentRegime() : { regime: 'normal' };
     const result = {};
     for (const [ticker, def] of Object.entries(defs)) {
         const p = prices[ticker];
+        const spreadBps = (p?.bid > 0 && p?.ask > 0)
+            ? (((p.ask - p.bid) / ((p.ask + p.bid) / 2)) * 10000)
+            : Number(def.base_spread_bps || 0);
         result[ticker] = {
             ...def,
             ticker,
@@ -70,6 +84,10 @@ router.get('/tickers', (req, res) => {
             low: p?.low,
             prevClose: p?.prevClose,
             volume: p?.volume,
+            spread_bps: +Number(spreadBps || 0).toFixed(4),
+            liquidity_score: Number(def.liquidity_score || 0),
+            borrow_apr_short: Number(def.borrow_apr_short || 0),
+            regime: regime.regime || 'normal',
             change: p ? +(p.price - p.prevClose).toFixed(engine.getDecimals(ticker)) : 0,
             changePct: p && p.prevClose ? +(((p.price - p.prevClose) / p.prevClose) * 100).toFixed(2) : 0,
         };
@@ -133,6 +151,7 @@ router.post('/orders', authenticate, asyncRoute(async (req, res) => {
 
     const user = await stmts.getUserById.get(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
+    const existingPosition = await stmts.getPosition.get(req.user.id, ticker.toUpperCase());
 
     const priceData = engine.getPrice(ticker.toUpperCase());
     const referencePrice = type === 'limit'
@@ -159,6 +178,23 @@ router.post('/orders', authenticate, asyncRoute(async (req, res) => {
         }
     }
 
+    const currentQty = Number(existingPosition?.qty || 0);
+    const longInventory = Math.max(0, currentQty);
+    const opensShortQty = side === 'sell'
+        ? Math.max(0, Number(qty) - longInventory)
+        : 0;
+    const midPrice = (Number(priceData?.bid || referencePrice) + Number(priceData?.ask || referencePrice)) / 2;
+    const estimatedExecution = estimateOrder({
+        tickerDef: engine.getTickerDef(ticker.toUpperCase()) || {},
+        side,
+        qty: Number(qty),
+        reference_price: referencePrice,
+        mid_price: Number.isFinite(midPrice) && midPrice > 0 ? midPrice : referencePrice,
+        volatility: Number(priceData?.volatility || 0),
+        opens_short_qty: opensShortQty,
+        regime: engine.getCurrentRegime ? engine.getCurrentRegime() : null,
+    });
+
     const orderId = uuid();
     const now = Date.now();
     await stmts.insertOrder.run(
@@ -178,7 +214,14 @@ router.post('/orders', authenticate, asyncRoute(async (req, res) => {
     );
 
     const order = await stmts.getOrderById.get(orderId);
-    res.json({ success: true, order });
+    res.json({
+        success: true,
+        order,
+        estimated_execution: {
+            ...estimatedExecution,
+            apply_realism: isExecutionRealismEnabled(),
+        },
+    });
 }));
 
 router.delete('/orders/:id', authenticate, asyncRoute(async (req, res) => {
@@ -246,11 +289,25 @@ router.get('/leaderboard', asyncRoute(async (req, res) => {
     // Group trades by user_id (keep only first 200 per user for badge calculations)
     const tradesByUser = new Map();
     const userTradeCounts = new Map();
+    const tradeCostByUser = new Map();
     for (const trade of allTrades) {
         if (!tradesByUser.has(trade.user_id)) {
             tradesByUser.set(trade.user_id, []);
             userTradeCounts.set(trade.user_id, 0);
+            tradeCostByUser.set(trade.user_id, {
+                totalSlippageCost: 0,
+                totalCommission: 0,
+                totalBorrowCost: 0,
+                totalExecutionCost: 0,
+            });
         }
+        const aggregateCosts = tradeCostByUser.get(trade.user_id);
+        aggregateCosts.totalSlippageCost += Number(trade.slippage_cost || 0);
+        aggregateCosts.totalCommission += Number(trade.commission || 0);
+        aggregateCosts.totalBorrowCost += Number(trade.borrow_cost || 0);
+        aggregateCosts.totalExecutionCost = aggregateCosts.totalSlippageCost
+            + aggregateCosts.totalCommission
+            + aggregateCosts.totalBorrowCost;
         const count = userTradeCounts.get(trade.user_id);
         if (count < 200) {
             tradesByUser.get(trade.user_id).push(trade);
@@ -268,17 +325,28 @@ router.get('/leaderboard', asyncRoute(async (req, res) => {
             if (priceData) positionsValue += position.qty * priceData.price;
         }
 
-        const totalValue = user.cash + positionsValue;
-        const allTimeReturn = ((totalValue - user.starting_cash) / user.starting_cash) * 100;
+        const trades = tradesByUser.get(user.id) || [];
+        const costAgg = tradeCostByUser.get(user.id) || aggregateTradeCosts(trades);
+        const netPortfolioValue = user.cash + positionsValue;
+        const grossPortfolioValue = netPortfolioValue + costAgg.totalExecutionCost;
+        const baseCapital = Number(user.starting_cash || 0);
+        const netReturn = baseCapital > 0
+            ? ((netPortfolioValue - baseCapital) / baseCapital) * 100
+            : 0;
+        const grossReturn = baseCapital > 0
+            ? ((grossPortfolioValue - baseCapital) / baseCapital) * 100
+            : 0;
+        const costDragPct = Math.abs(grossReturn) > 0
+            ? (Math.abs(grossReturn - netReturn) / Math.abs(grossReturn)) * 100
+            : 0;
 
         const badges = [];
-        if (totalValue > 50000) badges.push('🐋');
-        if (allTimeReturn > 100) badges.push('🦅');
-        if (totalValue < user.starting_cash * 0.3) badges.push('💀');
-        if (allTimeReturn > 400) badges.push('🚀');
-
-        const trades = tradesByUser.get(user.id) || [];
+        if (netPortfolioValue > 50000) badges.push('🐋');
+        if (netReturn > 100) badges.push('🦅');
+        if (baseCapital > 0 && netPortfolioValue < baseCapital * 0.3) badges.push('💀');
+        if (netReturn > 400) badges.push('🚀');
         if (trades.length >= 100) badges.push('🔥');
+        if (costDragPct <= 6 && trades.length >= 10) badges.push('🧠');
 
         let streak = 0;
         let maxStreak = 0;
@@ -294,16 +362,25 @@ router.get('/leaderboard', asyncRoute(async (req, res) => {
 
         leaderboard.push({
             username: user.username,
-            portfolioValue: +totalValue.toFixed(2),
+            portfolioValue: +netPortfolioValue.toFixed(2),
+            net_portfolio_value: +netPortfolioValue.toFixed(2),
+            gross_portfolio_value: +grossPortfolioValue.toFixed(2),
             cash: +user.cash.toFixed(2),
             positionsValue: +positionsValue.toFixed(2),
-            allTimeReturn: +allTimeReturn.toFixed(2),
+            allTimeReturn: +netReturn.toFixed(2),
+            net_return: +netReturn.toFixed(2),
+            gross_return: +grossReturn.toFixed(2),
+            total_slippage_cost: +costAgg.totalSlippageCost.toFixed(2),
+            total_commission: +costAgg.totalCommission.toFixed(2),
+            total_borrow_cost: +costAgg.totalBorrowCost.toFixed(2),
+            cost_drag_pct: +costDragPct.toFixed(2),
+            execution_discipline: costDragPct <= 6 ? 'high' : costDragPct <= 14 ? 'medium' : 'low',
             badges,
             joinedAt: user.created_at,
         });
     }
 
-    leaderboard.sort((a, b) => b.portfolioValue - a.portfolioValue);
+    leaderboard.sort((a, b) => b.net_portfolio_value - a.net_portfolio_value);
     leaderboard.forEach((entry, index) => {
         entry.rank = index + 1;
     });
@@ -341,10 +418,22 @@ router.get('/portfolio/stats', authenticate, asyncRoute(async (req, res) => {
 
     const totalValue = user.cash + positionsValue;
     const allTimeReturn = ((totalValue - user.starting_cash) / user.starting_cash) * 100;
+    const netPnl = totalValue - user.starting_cash;
+    const costAgg = aggregateTradeCosts(trades);
+    const grossPnl = netPnl + costAgg.totalExecutionCost;
+    const grossPortfolioValue = user.starting_cash + grossPnl;
+    const grossReturn = user.starting_cash > 0
+        ? ((grossPortfolioValue - user.starting_cash) / user.starting_cash) * 100
+        : 0;
+    const costDragPct = Math.abs(grossPnl) > 0
+        ? (costAgg.totalExecutionCost / Math.abs(grossPnl)) * 100
+        : 0;
 
     const wins = trades.filter((trade) => trade.pnl > 0);
     const losses = trades.filter((trade) => trade.pnl < 0);
     const winRate = trades.length > 0 ? (wins.length / trades.length) * 100 : 0;
+    const resolvedTrades = wins.length + losses.length;
+    const netWinRate = resolvedTrades > 0 ? (wins.length / resolvedTrades) * 100 : 0;
     const avgWin = wins.length > 0 ? wins.reduce((sum, trade) => sum + trade.pnl, 0) / wins.length : 0;
     const avgLoss = losses.length > 0 ? losses.reduce((sum, trade) => sum + trade.pnl, 0) / losses.length : 0;
 
@@ -359,20 +448,41 @@ router.get('/portfolio/stats', authenticate, asyncRoute(async (req, res) => {
 
     const snapshots = await stmts.getUserSnapshots.all(req.user.id, 500);
 
+    const asOf = Date.now();
     res.json({
+        as_of: asOf,
         totalValue: +totalValue.toFixed(2),
+        gross_portfolio_value: +grossPortfolioValue.toFixed(2),
+        net_portfolio_value: +totalValue.toFixed(2),
         cash: +user.cash.toFixed(2),
         positionsValue: +positionsValue.toFixed(2),
         startingCash: user.starting_cash,
         allTimeReturn: +allTimeReturn.toFixed(2),
+        gross_return: +grossReturn.toFixed(2),
+        net_return: +allTimeReturn.toFixed(2),
+        gross_pnl: +grossPnl.toFixed(2),
+        net_pnl: +netPnl.toFixed(2),
+        total_slippage_cost: +costAgg.totalSlippageCost.toFixed(2),
+        total_commission: +costAgg.totalCommission.toFixed(2),
+        total_borrow_cost: +costAgg.totalBorrowCost.toFixed(2),
+        total_execution_cost: +costAgg.totalExecutionCost.toFixed(2),
+        cost_drag_pct: +costDragPct.toFixed(2),
         totalTrades: trades.length,
         winRate: +winRate.toFixed(1),
+        net_win_rate: +netWinRate.toFixed(1),
         avgWin: +avgWin.toFixed(2),
         avgLoss: +avgLoss.toFixed(2),
         bestTrade,
         worstTrade,
         mostTraded: mostTraded ? { ticker: mostTraded[0], count: mostTraded[1] } : null,
         snapshots: snapshots.reverse(),
+        calculation_basis: {
+            portfolio_value: 'cash_plus_mark_to_market_positions',
+            all_time_return: 'portfolio_value_minus_starting_cash_over_starting_cash',
+            trade_stats: 'realized_trade_pnl_ledger',
+            gross_pnl: 'net_pnl_plus_execution_costs',
+            net_pnl: 'portfolio_value_minus_starting_cash',
+        },
     });
 }));
 
@@ -397,6 +507,24 @@ function requireFundMember(req, res, next) {
         req.membership = membership;
         next();
     })().catch(next);
+}
+
+function aggregateTradeCosts(trades = []) {
+    let totalSlippageCost = 0;
+    let totalCommission = 0;
+    let totalBorrowCost = 0;
+    for (const trade of trades) {
+        totalSlippageCost += Number(trade.slippage_cost || 0);
+        totalCommission += Number(trade.commission || 0);
+        totalBorrowCost += Number(trade.borrow_cost || 0);
+    }
+    const totalExecutionCost = totalSlippageCost + totalCommission + totalBorrowCost;
+    return {
+        totalSlippageCost,
+        totalCommission,
+        totalBorrowCost,
+        totalExecutionCost,
+    };
 }
 
 function hasFundManagerAccess(membership) {
@@ -497,6 +625,64 @@ function getSafeNavPerUnit(nav, totalUnits) {
     return Math.max(0.0001, navValue / units);
 }
 
+async function getFundLedgerState(fundId) {
+    const transactionsRaw = await stmts.getFundCapitalTransactions.all(fundId);
+    const transactions = normalizeCapitalTransactions(transactionsRaw);
+    return {
+        transactions,
+        netCapital: sumNetCapital(transactions),
+        totalUnits: sumUnits(transactions),
+    };
+}
+
+async function getUserFundLedgerState(fundId, userId) {
+    const transactionsRaw = await stmts.getUserCapitalInFund.all(fundId, userId);
+    const transactions = normalizeCapitalTransactions(transactionsRaw);
+    return {
+        transactions,
+        netCapital: sumNetCapital(transactions),
+        totalUnits: sumUnits(transactions),
+    };
+}
+
+function buildInvestorLedgerFromTransactions(transactions, navPerUnit, totalUnits) {
+    const byUser = new Map();
+    for (const tx of transactions || []) {
+        const userId = tx.userId;
+        if (!userId) continue;
+        if (!byUser.has(userId)) {
+            byUser.set(userId, {
+                user_id: userId,
+                username: tx.username || userId,
+                units: 0,
+                netCapital: 0,
+            });
+        }
+        const current = byUser.get(userId);
+        current.units += toNum(tx.unitsDelta, 0);
+        current.netCapital += tx.type === 'deposit' ? toNum(tx.amount, 0) : -toNum(tx.amount, 0);
+    }
+
+    return Array.from(byUser.values())
+        .filter((row) => Math.abs(toNum(row.units, 0)) > 1e-7)
+        .map((row) => {
+            const units = toNum(row.units, 0);
+            const netCapital = toNum(row.netCapital, 0);
+            const value = units * toNum(navPerUnit, 1);
+            const ownershipPct = toNum(totalUnits, 0) > 0 ? (units / toNum(totalUnits, 0)) * 100 : 0;
+            return {
+                user_id: row.user_id,
+                username: row.username,
+                units: +units.toFixed(8),
+                netCapital: +netCapital.toFixed(2),
+                value: +value.toFixed(2),
+                ownershipPct: +ownershipPct.toFixed(4),
+                pnl: +(value - netCapital).toFixed(2),
+            };
+        })
+        .sort((a, b) => b.units - a.units);
+}
+
 async function getFundNavState(fundId) {
     let utilization = null;
     try {
@@ -505,15 +691,12 @@ async function getFundNavState(fundId) {
         utilization = null;
     }
 
-    const [netCapitalRow, totalUnitsRow] = await Promise.all([
-        stmts.getFundNetCapital.get(fundId),
-        stmts.getFundTotalUnits.get(fundId),
-    ]);
+    const fundLedger = await getFundLedgerState(fundId);
 
-    const capital = toNum(utilization?.capital, toNum(netCapitalRow?.net_capital, 0));
+    const capital = toNum(utilization?.capital, toNum(fundLedger.netCapital, 0));
     const pnl = toNum(utilization?.totalPnl, 0);
     const nav = toNum(utilization?.equity, capital + pnl);
-    const totalUnits = toNum(totalUnitsRow?.total_units, 0);
+    const totalUnits = toNum(fundLedger.totalUnits, 0);
     const navPerUnit = getSafeNavPerUnit(nav, totalUnits);
 
     return {
@@ -878,15 +1061,14 @@ router.get('/funds/:id/nav', authenticate, requireFundMember, asyncRoute(async (
     const fundId = req.params.id;
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 120, 1), 500);
 
-    const [navState, snapshotsRaw, userUnitsRow, userCapitalRow] = await Promise.all([
+    const [navState, snapshotsRaw, userLedger] = await Promise.all([
         getFundNavState(fundId),
         stmts.getFundNavSnapshots.all(fundId, limit),
-        stmts.getUserFundUnits.get(fundId, req.user.id),
-        stmts.getUserFundNetCapital.get(fundId, req.user.id),
+        getUserFundLedgerState(fundId, req.user.id),
     ]);
 
-    const userUnits = toNum(userUnitsRow?.total_units, 0);
-    const userCapital = toNum(userCapitalRow?.net_capital, 0);
+    const userUnits = toNum(userLedger?.totalUnits, 0);
+    const userCapital = toNum(userLedger?.netCapital, 0);
     const userValue = +(userUnits * navState.navPerUnit).toFixed(2);
     const userOwnershipPct = navState.totalUnits > 0
         ? +((userUnits / navState.totalUnits) * 100).toFixed(4)
@@ -916,9 +1098,11 @@ router.get('/funds/:id/nav', authenticate, requireFundMember, asyncRoute(async (
         });
     }
 
+    const asOf = Date.now();
     res.json({
         fundId,
-        asOf: Date.now(),
+        asOf,
+        as_of: asOf,
         nav: navState.nav,
         navPerUnit: navState.navPerUnit,
         totalUnits: navState.totalUnits,
@@ -934,40 +1118,96 @@ router.get('/funds/:id/nav', authenticate, requireFundMember, asyncRoute(async (
             pnl: +(userValue - userCapital).toFixed(2),
         },
         snapshots,
+        calculation_basis: {
+            nav: 'capital_plus_strategy_pnl',
+            nav_per_unit: 'nav_over_total_units_with_safe_floor',
+            user_value: 'user_units_x_nav_per_unit',
+        },
     });
 }));
 
 // Investor unit ledger (analyst/owner only)
 router.get('/funds/:id/investors', authenticate, requireFundAnalyst, asyncRoute(async (req, res) => {
     const fundId = req.params.id;
-    const [navState, investorsRaw] = await Promise.all([
+    const [navState, capitalTxRaw] = await Promise.all([
         getFundNavState(fundId),
-        stmts.getFundInvestorLedger.all(fundId),
+        stmts.getFundCapitalTransactions.all(fundId),
     ]);
 
-    const investors = investorsRaw.map((row) => {
-        const units = toNum(row.units, 0);
-        const netCapital = toNum(row.net_capital, 0);
-        const value = units * navState.navPerUnit;
-        const ownershipPct = navState.totalUnits > 0 ? (units / navState.totalUnits) * 100 : 0;
-        return {
-            user_id: row.user_id,
-            username: row.username,
-            units: +units.toFixed(8),
-            netCapital: +netCapital.toFixed(2),
-            value: +value.toFixed(2),
-            ownershipPct: +ownershipPct.toFixed(4),
-            pnl: +(value - netCapital).toFixed(2),
-        };
-    });
+    const capitalTx = normalizeCapitalTransactions(capitalTxRaw);
+    const investors = buildInvestorLedgerFromTransactions(capitalTx, navState.navPerUnit, navState.totalUnits);
 
+    const asOf = Date.now();
     res.json({
         fundId,
-        asOf: Date.now(),
+        asOf,
+        as_of: asOf,
         nav: navState.nav,
         navPerUnit: navState.navPerUnit,
         totalUnits: navState.totalUnits,
         investors,
+        calculation_basis: {
+            investor_value: 'investor_units_x_nav_per_unit',
+            investor_ownership: 'investor_units_over_total_units',
+        },
+    });
+}));
+
+// Fund reconciliation checks (analyst/owner only)
+router.get('/funds/:id/reconciliation', authenticate, requireFundAnalyst, asyncRoute(async (req, res) => {
+    const fundId = req.params.id;
+    const [navState, capitalTxRaw, snapshotsRaw] = await Promise.all([
+        getFundNavState(fundId),
+        stmts.getFundCapitalTransactions.all(fundId),
+        stmts.getFundNavSnapshots.all(fundId, 1),
+    ]);
+
+    const capitalTx = normalizeCapitalTransactions(capitalTxRaw);
+    const snapshots = normalizeNavSnapshots(snapshotsRaw);
+    const latestSnapshot = snapshots.length ? snapshots[snapshots.length - 1] : null;
+
+    const netCapitalByTx = round2(sumNetCapital(capitalTx));
+    const totalUnitsByTx = round8(sumUnits(capitalTx));
+    const navByUnits = round2(totalUnitsByTx * navState.navPerUnit);
+
+    const investors = buildInvestorLedgerFromTransactions(capitalTx, navState.navPerUnit, navState.totalUnits)
+        .map((row) => ({
+            user_id: row.user_id,
+            username: row.username,
+            units: round8(Number(row.units || 0)),
+            net_capital: round2(Number(row.netCapital || 0)),
+            value: round2(Number(row.value || 0)),
+        }));
+    const investorValueTotal = round2(investors.reduce((sum, row) => sum + row.value, 0));
+
+    const checks = computeReconciliation({
+        nav: navState.nav,
+        capital: navState.capital,
+        pnl: navState.pnl,
+        fees: 0,
+        investorValue: investorValueTotal,
+        unitsValue: navByUnits,
+        tolerance: 0.01,
+    });
+
+    res.json({
+        fundId,
+        as_of: Number(latestSnapshot?.snapshotAt || Date.now()),
+        nav: round2(navState.nav),
+        navPerUnit: round8(navState.navPerUnit),
+        capital: round2(navState.capital),
+        pnl: round2(navState.pnl),
+        netCapitalByTransactions: netCapitalByTx,
+        totalUnitsByTransactions: totalUnitsByTx,
+        navByUnits,
+        investorValueTotal,
+        investors,
+        checks,
+        calculation_basis: {
+            nav_formula: 'capital_plus_pnl_minus_fees_assumed_zero',
+            nav_units_check: 'total_units_x_nav_per_unit',
+            investor_ledger_check: 'sum_investor_value_equals_nav',
+        },
     });
 }));
 
@@ -1114,7 +1354,28 @@ router.get('/funds/:fundId/dashboard', authenticate, asyncRoute(async (req, res)
 
     const strategies = await stmts.getStrategiesByFund.all(fundId);
     const dashboard = strategyRunner.getDashboardData(fundId, strategies);
-    res.json(dashboard);
+    const summary = dashboard?.summary || {};
+    res.json({
+        ...dashboard,
+        summary: {
+            ...summary,
+            gross_pnl: Number(summary.grossPnl || 0),
+            net_pnl: Number(summary.netPnl || 0),
+            total_slippage_cost: Number(summary.totalSlippageCost || 0),
+            total_commission: Number(summary.totalCommission || 0),
+            total_borrow_cost: Number(summary.totalBorrowCost || 0),
+            total_execution_cost: Number(summary.totalExecutionCost || 0),
+            cost_drag_pct: Number(summary.executionDragPct || 0),
+        },
+        as_of: Date.now(),
+        calculation_basis: {
+            fills: 'count_of_strategy_trade_executions',
+            closed_trades: 'wins_plus_losses_plus_breakevens',
+            non_closing_fills: 'fills_minus_closed_trades',
+            win_rate: 'wins_over_resolved_trades',
+            gross_pnl: 'net_pnl_plus_execution_costs',
+        },
+    });
 }));
 
 // Strategy trades

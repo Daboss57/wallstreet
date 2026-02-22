@@ -9,6 +9,7 @@ const news = require('./src/news');
 const wsServer = require('./src/wsServer');
 const matcher = require('./src/matcher');
 const strategyRunner = require('./src/strategyRunner');
+const { getRecentMetrics } = require('./src/executionModel');
 const {
     initDb,
     closeDb,
@@ -111,6 +112,8 @@ app.use((req, res, next) => {
 
 app.get('/healthz', (req, res) => {
     const db = getDbDiagnostics();
+    const regime = engine.getCurrentRegime ? engine.getCurrentRegime() : { regime: 'normal' };
+    const execMetrics = getRecentMetrics(5 * 60 * 1000);
     res.json({
         status: 'ok',
         db: {
@@ -121,6 +124,12 @@ app.get('/healthz', (req, res) => {
             config: db.config,
         },
         backgroundPaused,
+        execution: {
+            current_regime: regime.regime || 'normal',
+            avg_slippage_bps_5m: Number(execMetrics.avg_slippage_bps || 0),
+            fill_quality_avg_5m: Number(execMetrics.avg_execution_quality || 0),
+            sample_count_5m: Number(execMetrics.count || 0),
+        },
     });
 });
 

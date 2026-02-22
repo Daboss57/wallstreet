@@ -13,6 +13,7 @@ const Funds = {
   capitalTransactions: [],
   navData: null,
   investorLedger: [],
+  reconciliation: null,
   riskSettings: null,
   riskUtilization: null,
   riskBreaches: [],
@@ -224,11 +225,13 @@ const Funds = {
 
         <div class="fund-tabs">
           <button class="fund-tab ${this.currentTab === 'overview' ? 'active' : ''}" data-tab="overview">Overview</button>
+          ${isAnalyst ? `
           <button class="fund-tab ${this.currentTab === 'members' ? 'active' : ''}" data-tab="members">Members</button>
           <button class="fund-tab ${this.currentTab === 'capital' ? 'active' : ''}" data-tab="capital">Capital</button>
           <button class="fund-tab ${this.currentTab === 'risk' ? 'active' : ''}" data-tab="risk">Risk</button>
           <button class="fund-tab ${this.currentTab === 'strategies' ? 'active' : ''}" data-tab="strategies">Strategies</button>
           <button class="fund-tab ${this.currentTab === 'dashboard' ? 'active' : ''}" data-tab="dashboard">📊 Dashboard</button>
+          ` : ''}
         </div>
 
         <div class="fund-tab-content">
@@ -239,6 +242,16 @@ const Funds = {
   },
 
   renderTabContent() {
+    const isAnalyst = this.currentFund?.role === 'owner' || this.currentFund?.role === 'analyst';
+    if (!isAnalyst && this.currentTab !== 'overview') {
+      return `
+        <div class="empty-state">
+          <span class="empty-icon">🔒</span>
+          <span class="empty-text">Analyst or owner access is required for this section.</span>
+        </div>
+      `;
+    }
+
     switch (this.currentTab) {
       case 'overview': return this.renderOverviewTab();
       case 'members': return this.renderMembersTab();
@@ -359,6 +372,9 @@ const Funds = {
     const userInvestor = nav.user || this.getUserInvestor();
     const investors = this.investorLedger || [];
     const snapshots = nav.snapshots || [];
+    const reconciliation = this.reconciliation || {};
+    const checks = reconciliation.checks || {};
+    const totalUnits = Number(nav.totalUnits || reconciliation.totalUnitsByTransactions || 0);
 
     return `
       <div class="capital-section">
@@ -402,6 +418,27 @@ const Funds = {
           </div>
         </div>
 
+        ${reconciliation && Object.keys(reconciliation).length > 0 ? `
+        <h3 style="margin-top:8px;margin-bottom:12px">Ledger Reconciliation</h3>
+        <div class="capital-summary capital-summary-grid">
+          <div class="overview-card">
+            <div class="card-label">NAV Formula Check</div>
+            <div class="card-value ${checks.isNavBalanced ? 'price-up' : 'price-down'}">${checks.isNavBalanced ? 'PASS' : 'FAIL'}</div>
+            <div class="card-subtitle">${Utils.num(checks.navResidual || 0, 4)}</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Investor Ledger Check</div>
+            <div class="card-value ${checks.isInvestorLedgerBalanced ? 'price-up' : 'price-down'}">${checks.isInvestorLedgerBalanced ? 'PASS' : 'FAIL'}</div>
+            <div class="card-subtitle">${Utils.num(checks.investorResidual || 0, 4)}</div>
+          </div>
+          <div class="overview-card">
+            <div class="card-label">Units x NAV Check</div>
+            <div class="card-value ${checks.isUnitsBalanced ? 'price-up' : 'price-down'}">${checks.isUnitsBalanced ? 'PASS' : 'FAIL'}</div>
+            <div class="card-subtitle">${Utils.num(checks.unitsResidual || 0, 4)}</div>
+          </div>
+        </div>
+        ` : ''}
+
         <h3 style="margin-top:8px;margin-bottom:12px">Investor Ledger</h3>
         ${investors.length === 0 ? `
         <div class="empty-state">
@@ -421,16 +458,21 @@ const Funds = {
             </tr>
           </thead>
           <tbody>
-            ${investors.map(inv => `
+            ${investors.map(inv => {
+              const ownershipPct = totalUnits > 0
+                ? (Number(inv.units || 0) / totalUnits) * 100
+                : Number(inv.ownershipPct || 0);
+              return `
             <tr>
               <td style="font-weight:600">${inv.username}</td>
               <td>${Utils.num(inv.units || 0, 4)}</td>
-              <td>${Utils.num(inv.ownershipPct || 0, 2)}%</td>
+              <td>${Utils.num(ownershipPct, 2)}%</td>
               <td>${Utils.money(inv.netCapital || 0)}</td>
               <td>${Utils.money(inv.value || 0)}</td>
               <td class="${Utils.colorClass(inv.pnl || 0)}">${Utils.money(inv.pnl || 0)}</td>
             </tr>
-            `).join('')}
+            `;
+            }).join('')}
           </tbody>
         </table>
         `}
@@ -778,7 +820,7 @@ const Funds = {
 
   async loadFundDetails(fundId) {
     try {
-      const [fund, members, strategies, customStrategies, capital, navData, investors, riskData] = await Promise.all([
+      const [fund, members, strategies, customStrategies, capital, navData, investors, riskData, reconciliation] = await Promise.all([
         Utils.get('/funds/' + fundId),
         Utils.get('/funds/' + fundId + '/members'),
         Utils.get('/funds/' + fundId + '/strategies'),
@@ -786,7 +828,8 @@ const Funds = {
         Utils.get('/funds/' + fundId + '/capital'),
         Utils.get('/funds/' + fundId + '/nav').catch(() => null),
         Utils.get('/funds/' + fundId + '/investors').catch(() => ({ investors: [] })),
-        Utils.get('/funds/' + fundId + '/risk').catch(() => null)
+        Utils.get('/funds/' + fundId + '/risk').catch(() => null),
+        Utils.get('/funds/' + fundId + '/reconciliation').catch(() => null),
       ]);
 
       // Get role from myFunds
@@ -798,6 +841,7 @@ const Funds = {
       this.capitalTransactions = capital;
       this.navData = navData;
       this.investorLedger = investors?.investors || [];
+      this.reconciliation = reconciliation;
       this.riskSettings = riskData?.settings || null;
       this.riskUtilization = riskData?.utilization || null;
       this.riskBreaches = riskData?.breaches || [];
@@ -828,6 +872,7 @@ const Funds = {
     this.capitalTransactions = [];
     this.navData = null;
     this.investorLedger = [];
+    this.reconciliation = null;
     this.riskSettings = null;
     this.riskUtilization = null;
     this.riskBreaches = [];
@@ -835,6 +880,14 @@ const Funds = {
   },
 
   switchTab(tab) {
+    const isAnalyst = this.currentFund?.role === 'owner' || this.currentFund?.role === 'analyst';
+    if (!isAnalyst && tab !== 'overview') {
+      Utils.showToast('error', 'Access Denied', 'Analyst or owner access required.');
+      this.currentTab = 'overview';
+      this.updateContent();
+      return;
+    }
+
     // Clean up dashboard refresh if leaving dashboard
     if (this.currentTab === 'dashboard' && tab !== 'dashboard') {
       if (this.dashboardInterval) {
@@ -859,14 +912,16 @@ const Funds = {
     const fundId = this.currentFund?.id;
     if (!fundId) return;
     try {
-      const [capital, navData, investors] = await Promise.all([
+      const [capital, navData, investors, reconciliation] = await Promise.all([
         Utils.get('/funds/' + fundId + '/capital'),
         Utils.get('/funds/' + fundId + '/nav').catch(() => this.navData),
-        Utils.get('/funds/' + fundId + '/investors').catch(() => ({ investors: this.investorLedger }))
+        Utils.get('/funds/' + fundId + '/investors').catch(() => ({ investors: this.investorLedger })),
+        Utils.get('/funds/' + fundId + '/reconciliation').catch(() => this.reconciliation),
       ]);
       this.capitalTransactions = capital || this.capitalTransactions;
       this.navData = navData || this.navData;
       this.investorLedger = investors?.investors || this.investorLedger;
+      this.reconciliation = reconciliation || this.reconciliation;
       if (this.currentTab === 'capital') {
         this.updateContent();
       }
@@ -1207,7 +1262,7 @@ const Funds = {
 
   // ─── Deposit/Withdraw Modals ─────────────────────────────────────────────────
   showDepositModal() {
-    const userCash = App.user?.cash || 0;
+    const userCash = Utils.toNumber(App.user?.cash, 0);
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
     modal.id = 'deposit-modal';
@@ -1240,7 +1295,7 @@ const Funds = {
   async depositCapital() {
     const fundId = this.currentFund?.id;
     const amount = parseFloat(document.getElementById('deposit-amount')?.value);
-    const availableCash = Number(App.user?.cash || 0);
+    const availableCash = Utils.toNumber(App.user?.cash, 0);
 
     if (!fundId) return;
 
@@ -1259,19 +1314,19 @@ const Funds = {
       document.getElementById('deposit-modal')?.remove();
 
       // Refresh data
-      const [capital, user, navData, investors] = await Promise.all([
+      const [capital, user, navData, investors, reconciliation] = await Promise.all([
         Utils.get('/funds/' + fundId + '/capital'),
         Utils.get('/me'),
         Utils.get('/funds/' + fundId + '/nav').catch(() => this.navData),
-        Utils.get('/funds/' + fundId + '/investors').catch(() => ({ investors: this.investorLedger })
-        )
+        Utils.get('/funds/' + fundId + '/investors').catch(() => ({ investors: this.investorLedger })),
+        Utils.get('/funds/' + fundId + '/reconciliation').catch(() => this.reconciliation),
       ]);
       this.capitalTransactions = capital;
       App.user = user;
       this.navData = navData || this.navData;
       this.investorLedger = investors?.investors || this.investorLedger;
-      const cashEl = document.getElementById('header-cash');
-      if (cashEl) cashEl.textContent = Utils.money(user.cash);
+      this.reconciliation = reconciliation || this.reconciliation;
+      Utils.syncHeaderBalance(user.cash);
       this.updateContent();
     } catch (e) {
       Utils.showToast('error', 'Deposit Failed', e.message);
@@ -1280,7 +1335,7 @@ const Funds = {
 
   showWithdrawModal() {
     const userInvestor = this.navData?.user || this.getUserInvestor();
-    const withdrawable = Number(userInvestor.value || 0);
+    const withdrawable = Utils.toNumber(userInvestor.value, 0);
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
     modal.id = 'withdraw-modal';
@@ -1314,7 +1369,7 @@ const Funds = {
     const fundId = this.currentFund?.id;
     const amount = parseFloat(document.getElementById('withdraw-amount')?.value);
     const userInvestor = this.navData?.user || this.getUserInvestor();
-    const availableCapital = Number(userInvestor.value || 0);
+    const availableCapital = Utils.toNumber(userInvestor.value, 0);
 
     if (!fundId) return;
 
@@ -1333,19 +1388,19 @@ const Funds = {
       document.getElementById('withdraw-modal')?.remove();
 
       // Refresh data
-      const [capital, user, navData, investors] = await Promise.all([
+      const [capital, user, navData, investors, reconciliation] = await Promise.all([
         Utils.get('/funds/' + fundId + '/capital'),
         Utils.get('/me'),
         Utils.get('/funds/' + fundId + '/nav').catch(() => this.navData),
-        Utils.get('/funds/' + fundId + '/investors').catch(() => ({ investors: this.investorLedger })
-        )
+        Utils.get('/funds/' + fundId + '/investors').catch(() => ({ investors: this.investorLedger })),
+        Utils.get('/funds/' + fundId + '/reconciliation').catch(() => this.reconciliation),
       ]);
       this.capitalTransactions = capital;
       App.user = user;
       this.navData = navData || this.navData;
       this.investorLedger = investors?.investors || this.investorLedger;
-      const cashEl = document.getElementById('header-cash');
-      if (cashEl) cashEl.textContent = Utils.money(user.cash);
+      this.reconciliation = reconciliation || this.reconciliation;
+      Utils.syncHeaderBalance(user.cash);
       this.updateContent();
     } catch (e) {
       Utils.showToast('error', 'Withdrawal Failed', e.message);
@@ -1900,7 +1955,18 @@ const Funds = {
     if (!d) return '<div class="bb-loading">No data available</div>';
 
     const s = d.summary;
+    const closedTrades = Number(s.closedTrades ?? s.totalTrades ?? 0);
+    const totalFills = Number(s.totalFills ?? s.totalTrades ?? 0);
+    const nonClosingFills = Number(s.nonClosingFills ?? Math.max(0, totalFills - closedTrades));
     const pnlClass = s.totalPnl >= 0 ? 'bb-green' : 'bb-red';
+    const grossPnl = Number(s.gross_pnl ?? s.grossPnl ?? (s.totalPnl || 0));
+    const netPnl = Number(s.net_pnl ?? s.netPnl ?? (s.totalPnl || 0));
+    const totalSlippageCost = Number(s.total_slippage_cost ?? s.totalSlippageCost ?? 0);
+    const totalCommission = Number(s.total_commission ?? s.totalCommission ?? 0);
+    const totalBorrowCost = Number(s.total_borrow_cost ?? s.totalBorrowCost ?? 0);
+    const executionDragPct = Number(s.cost_drag_pct ?? s.executionDragPct ?? 0);
+    const grossClass = grossPnl >= 0 ? 'bb-green' : 'bb-red';
+    const netClass = netPnl >= 0 ? 'bb-green' : 'bb-red';
     const realClass = s.realizedPnl >= 0 ? 'bb-green' : 'bb-red';
     const unrealClass = s.unrealizedPnl >= 0 ? 'bb-green' : 'bb-red';
 
@@ -1928,8 +1994,12 @@ const Funds = {
           <div class="bb-panel-title">P&L SUMMARY</div>
           <div class="bb-pnl-grid">
             <div class="bb-pnl-item">
-              <div class="bb-pnl-label">TOTAL P&L</div>
-              <div class="bb-pnl-value ${pnlClass}">${this.bbMoney(s.totalPnl)}</div>
+              <div class="bb-pnl-label">GROSS P&L</div>
+              <div class="bb-pnl-value ${grossClass}">${this.bbMoney(grossPnl)}</div>
+            </div>
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">NET P&L</div>
+              <div class="bb-pnl-value ${netClass}">${this.bbMoney(netPnl)}</div>
             </div>
             <div class="bb-pnl-item">
               <div class="bb-pnl-label">REALIZED</div>
@@ -1940,20 +2010,36 @@ const Funds = {
               <div class="bb-pnl-value ${unrealClass}">${this.bbMoney(s.unrealizedPnl)}</div>
             </div>
             <div class="bb-pnl-item">
-              <div class="bb-pnl-label">TRADES</div>
-              <div class="bb-pnl-value">${s.totalTrades}</div>
+              <div class="bb-pnl-label">CLOSED</div>
+              <div class="bb-pnl-value">${closedTrades}</div>
             </div>
             <div class="bb-pnl-item">
               <div class="bb-pnl-label">FILLS</div>
-              <div class="bb-pnl-value">${s.totalFills || 0}</div>
+              <div class="bb-pnl-value">${totalFills}</div>
+            </div>
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">OPENING FILLS</div>
+              <div class="bb-pnl-value">${nonClosingFills}</div>
+            </div>
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">SLIPPAGE</div>
+              <div class="bb-pnl-value bb-red">${this.bbMoney(totalSlippageCost)}</div>
+            </div>
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">COMMISSION</div>
+              <div class="bb-pnl-value bb-red">${this.bbMoney(totalCommission)}</div>
+            </div>
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">BORROW</div>
+              <div class="bb-pnl-value bb-red">${this.bbMoney(totalBorrowCost)}</div>
+            </div>
+            <div class="bb-pnl-item">
+              <div class="bb-pnl-label">EXEC DRAG</div>
+              <div class="bb-pnl-value ${executionDragPct <= 8 ? 'bb-green' : executionDragPct <= 15 ? 'bb-amber' : 'bb-red'}">${executionDragPct.toFixed(2)}%</div>
             </div>
             <div class="bb-pnl-item">
               <div class="bb-pnl-label">WIN RATE</div>
               <div class="bb-pnl-value ${s.winRate >= 50 ? 'bb-green' : s.winRate > 0 ? 'bb-amber' : ''}">${s.winRate}%</div>
-            </div>
-            <div class="bb-pnl-item">
-              <div class="bb-pnl-label">W / L / B</div>
-              <div class="bb-pnl-value"><span class="bb-green">${s.wins}</span> / <span class="bb-red">${s.losses}</span> / <span class="bb-dim">${s.breakevens || 0}</span></div>
             </div>
           </div>
         </div>
@@ -1966,7 +2052,7 @@ const Funds = {
           ${this.renderBBPositions(d.positions)}
         </div>
         <div class="bb-panel">
-          <div class="bb-panel-title">LIVE TRADES <span class="bb-badge">${d.trades.length}</span></div>
+          <div class="bb-panel-title">RECENT FILLS <span class="bb-badge">${d.trades.length}/${totalFills}</span></div>
           ${this.renderBBTrades(d.trades)}
         </div>
       </div>
@@ -2022,7 +2108,7 @@ const Funds = {
       <div class="bb-table-wrap bb-scrollable">
         <table class="bb-table">
           <thead>
-            <tr><th>TIME</th><th>TICKER</th><th>SIDE</th><th>QTY</th><th>PRICE</th><th>STRATEGY</th></tr>
+            <tr><th>TIME</th><th>TICKER</th><th>SIDE</th><th>QTY</th><th>PRICE</th><th>SLIP</th><th>COMM</th><th>BORROW</th><th>REGIME</th><th>STRATEGY</th></tr>
           </thead>
           <tbody>
             ${trades.slice(0, 20).map(t => {
@@ -2032,6 +2118,10 @@ const Funds = {
                 <td class="${t.side === 'buy' ? 'bb-green' : 'bb-red'}">${t.side.toUpperCase()}</td>
                 <td>${t.quantity}</td>
                 <td class="bb-mono">${Number(t.price).toFixed(2)}</td>
+                <td class="bb-mono">${Number(t.slippage_bps || 0).toFixed(2)}bps</td>
+                <td class="bb-mono">${this.bbMoney(t.commission || 0)}</td>
+                <td class="bb-mono">${this.bbMoney(t.borrow_cost || 0)}</td>
+                <td class="bb-dim">${t.regime || 'normal'}</td>
                 <td class="bb-dim">${t.strategy_name || ''}</td>
               </tr>`;
     }).join('')}
@@ -2051,8 +2141,11 @@ const Funds = {
       const totalPnl = s.realizedPnl + s.unrealizedPnl;
       const pnlClass = totalPnl >= 0 ? 'bb-green' : 'bb-red';
       const fillCount = Number(s.fillCount || 0);
-      const winRate = (s.winCount + s.lossCount) > 0
-        ? ((s.winCount / (s.winCount + s.lossCount)) * 100).toFixed(0) : '—';
+      const closedCount = Number(s.closedTradeCount ?? s.tradeCount ?? 0);
+      const nonClosingFills = Number(s.nonClosingFills ?? Math.max(0, fillCount - closedCount));
+      const winRate = Number.isFinite(Number(s.winRate))
+        ? Number(s.winRate).toFixed(0)
+        : ((s.winCount + s.lossCount) > 0 ? ((s.winCount / (s.winCount + s.lossCount)) * 100).toFixed(0) : '—');
       const typeIcon = this.STRATEGY_TYPES[s.type]?.icon || '📊';
       return `
             <div class="bb-strat-card">
@@ -2062,7 +2155,9 @@ const Funds = {
               </div>
               <div class="bb-strat-metrics">
                 <div><span class="bb-dim">P&L</span> <span class="${pnlClass}">${this.bbMoney(totalPnl)}</span></div>
-                <div><span class="bb-dim">Closed/Fills</span> <span>${s.tradeCount}/${fillCount}</span></div>
+                <div><span class="bb-dim">Cost Drag</span> <span>${Number(s.costDragPct || 0).toFixed(2)}%</span></div>
+                <div><span class="bb-dim">Closed/Fills</span> <span>${closedCount}/${fillCount}</span></div>
+                <div><span class="bb-dim">Opening Fills</span> <span>${nonClosingFills}</span></div>
                 <div><span class="bb-dim">Win%</span> <span>${winRate}%</span></div>
                 <div><span class="bb-dim">W/L/B</span> <span><span class="bb-green">${s.winCount}</span>/<span class="bb-red">${s.lossCount}</span>/<span class="bb-dim">${s.breakevenCount || 0}</span></span></div>
               </div>

@@ -3,31 +3,42 @@
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 const Utils = {
+    toNumber(value, fallback = 0) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    },
+
     // Format currency
     money(val, decimals = 2) {
-        if (val === null || val === undefined) return '$0.00';
-        const sign = val < 0 ? '-' : '';
-        return sign + '$' + Math.abs(val).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+        const amount = this.toNumber(val, 0);
+        const sign = amount < 0 ? '-' : '';
+        return sign + '$' + Math.abs(amount).toLocaleString('en-US', {
+            minimumFractionDigits: decimals,
+            maximumFractionDigits: decimals,
+        });
     },
 
     // Format number with commas
     num(val, decimals = 2) {
-        if (val === null || val === undefined) return '0';
-        return val.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+        const value = this.toNumber(val, 0);
+        return value.toLocaleString('en-US', {
+            minimumFractionDigits: decimals,
+            maximumFractionDigits: decimals,
+        });
     },
 
     // Format percent
     pct(val) {
-        if (val === null || val === undefined) return '0.00%';
-        const sign = val >= 0 ? '+' : '';
-        return sign + val.toFixed(2) + '%';
+        const value = this.toNumber(val, 0);
+        const sign = value >= 0 ? '+' : '';
+        return sign + value.toFixed(2) + '%';
     },
 
     // Format change
     change(val, decimals = 2) {
-        if (val === null || val === undefined) return '0.00';
-        const sign = val >= 0 ? '+' : '';
-        return sign + val.toFixed(decimals);
+        const value = this.toNumber(val, 0);
+        const sign = value >= 0 ? '+' : '';
+        return sign + value.toFixed(decimals);
     },
 
     // Time ago
@@ -62,10 +73,21 @@ const Utils = {
 
     // Abbreviate large numbers
     abbrev(val) {
-        if (Math.abs(val) >= 1e9) return (val / 1e9).toFixed(1) + 'B';
-        if (Math.abs(val) >= 1e6) return (val / 1e6).toFixed(1) + 'M';
-        if (Math.abs(val) >= 1e3) return (val / 1e3).toFixed(1) + 'K';
-        return val.toFixed(0);
+        const value = this.toNumber(val, 0);
+        if (Math.abs(value) >= 1e9) return (value / 1e9).toFixed(1) + 'B';
+        if (Math.abs(value) >= 1e6) return (value / 1e6).toFixed(1) + 'M';
+        if (Math.abs(value) >= 1e3) return (value / 1e3).toFixed(1) + 'K';
+        return value.toFixed(0);
+    },
+
+    syncHeaderBalance(cash) {
+        const parsedCash = this.toNumber(cash, 0);
+        if (window.App) {
+            if (!App.user) App.user = {};
+            App.user.cash = parsedCash;
+        }
+        const cashEl = document.getElementById('header-cash');
+        if (cashEl) cashEl.textContent = this.money(parsedCash);
     },
 
     // API helpers

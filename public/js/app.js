@@ -118,10 +118,10 @@ const App = {
         </nav>
 
         <section class="landing-hero">
-          <h1>Master the Market.<br>Zero Risk.</h1>
+          <h1>Master the Market.<br>Realistic Execution.</h1>
           <p class="subtitle">
-            Real-time trading simulator with 30+ instruments across stocks, commodities, futures, ETFs, crypto, and forex.
-            Live charts. Real order books. Pure market chaos.
+            Real-time execution simulator with deterministic slippage, commissions, borrow costs, and live liquidity regimes.
+            Train on net performance, not toy fills.
           </p>
           <div class="cta-group">
             <button class="btn-primary" onclick="App.showAuth('register')">Create Free Account</button>
@@ -138,8 +138,8 @@ const App = {
         <section class="landing-features">
           <div class="feature-card">
             <div class="feature-icon">⚡</div>
-            <h3>Ultra Low Latency</h3>
-            <p>1-second tick rate. WebSocket push. Sub-50ms updates. Charts extend live. No polling, no page refreshes.</p>
+            <h3>Execution Realism</h3>
+            <p>Every fill includes deterministic slippage, commission minimums, borrow accrual, and execution quality scoring.</p>
           </div>
           <div class="feature-card">
             <div class="feature-icon">📊</div>

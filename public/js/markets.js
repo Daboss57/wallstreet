@@ -5,9 +5,12 @@
 const Markets = {
     tickers: {},
     filter: 'all',
+    currentRegime: 'normal',
 
     async render(container) {
         try { this.tickers = await Utils.get('/tickers'); } catch (e) { console.error(e); }
+        const firstTicker = Object.values(this.tickers)[0];
+        this.currentRegime = firstTicker?.regime || 'normal';
 
         const classes = ['all', ...new Set(Object.values(this.tickers).map(t => t.class))];
 
@@ -17,6 +20,11 @@ const Markets = {
         <div class="markets-page" id="markets-page">
           <h1>📈 Markets</h1>
           <p class="page-subtitle">All instruments at a glance. Click to trade.</p>
+          <div class="portfolio-stat-card" style="margin-bottom:12px;max-width:320px">
+            <div class="psc-label">Market Regime</div>
+            <div class="psc-value">${this.currentRegime.replace('_', ' ')}</div>
+            <div class="psc-sub text-muted">Execution conditions adapt by regime</div>
+          </div>
           <div class="markets-filters" id="markets-filters">
             ${classes.map(c => `<button class="markets-filter-btn ${c === this.filter ? 'active' : ''}" data-filter="${c}">${c === 'all' ? 'All' : c + 's'}</button>`).join('')}
           </div>
@@ -55,8 +63,9 @@ const Markets = {
           </div>
           <div class="mc-meta">
             <span>Vol: ${Utils.abbrev(def.volume || 0)}</span>
-            <span>H: ${Utils.num(def.high || def.price || 0)}</span>
-            <span>L: ${Utils.num(def.low || def.price || 0)}</span>
+            <span>Spread: ${Utils.num(def.spread_bps || 0, 2)} bps</span>
+            <span>Liq: ${Math.round(def.liquidity_score || 0)}/100</span>
+            <span>Borrow: ${Utils.num((Number(def.borrow_apr_short || 0) * 100), 2)}%</span>
           </div>
         </div>`;
         }).join('');
@@ -93,6 +102,11 @@ const Markets = {
                 changeEl.textContent = Utils.pct(tick.changePct);
                 changeEl.className = 'mc-change ' + Utils.colorClass(tick.changePct);
             }
+            if (tick.regime) Markets.currentRegime = tick.regime;
+        }
+        const regimeCard = document.querySelector('.markets-page .portfolio-stat-card .psc-value');
+        if (regimeCard) {
+            regimeCard.textContent = String(Markets.currentRegime || 'normal').replace('_', ' ');
         }
     }, 500),
 

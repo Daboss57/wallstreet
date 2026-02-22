@@ -41,12 +41,15 @@ const News = {
     renderEvents() {
         return this.events.map(event => {
             const colorCls = event.price_impact >= 0 ? 'price-up' : 'price-down';
+            const isLiquidityShock = Boolean(event.liquidity_shock) || String(event.type || '').toLowerCase().includes('liquidity');
             return `
         <div class="news-card">
           <div class="news-card-header">
             <span class="news-severity ${event.severity || 'normal'}">${event.severity === 'high' ? '🔴 BREAKING' : '🔵 News'}</span>
             <span class="news-time">${Utils.timeAgo(event.fired_at)}</span>
             <span class="news-ticker-badge">${event.ticker || 'MARKET'}</span>
+            ${isLiquidityShock ? `<span class="news-ticker-badge" style="background:rgba(239,68,68,.2);color:#fca5a5">Liquidity Shock</span>` : ''}
+            ${event.regime ? `<span class="news-ticker-badge" style="background:rgba(59,130,246,.2);color:#93c5fd">${event.regime}</span>` : ''}
           </div>
           <h3>${event.headline}</h3>
           <p>${event.body || ''}</p>
