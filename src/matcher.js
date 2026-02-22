@@ -1,5 +1,5 @@
 const { v4: uuid } = require('uuid');
-const { stmts, isDbUnavailableError } = require('./db');
+const { stmts, isDbUnavailableError, runInTransaction } = require('./db');
 const engine = require('./engine');
 const {
     estimateExecution,
@@ -102,8 +102,9 @@ async function upsertPositionState({
     openedAt,
     accruedBorrowCost,
     lastBorrowAccrualAt,
+    client = null,
 }) {
-    await stmts.upsertPosition.run(
+    const params = [
         id,
         userId,
         ticker,
@@ -111,8 +112,13 @@ async function upsertPositionState({
         avgCost,
         openedAt,
         accruedBorrowCost,
-        lastBorrowAccrualAt
-    );
+        lastBorrowAccrualAt,
+    ];
+    if (client) {
+        await stmts.upsertPosition.runTx(client, ...params);
+    } else {
+        await stmts.upsertPosition.run(...params);
+    }
 }
 
 async function accrueBorrowCosts(now) {
@@ -152,19 +158,49 @@ async function accrueBorrowCosts(now) {
             regime,
         });
         if (!Number.isFinite(accrual) || accrual <= 0) continue;
+        await runInTransaction(`matcher_borrow_accrual_${position.id || `${position.user_id}_${position.ticker}`}`, async (client) => {
+            const lockedPosition = await stmts.getPositionForUpdate.getTx(client, position.user_id, position.ticker);
+            if (!lockedPosition) return;
+            const lockedQty = safeNumber(lockedPosition.qty, 0);
+            if (lockedQty >= 0) return;
 
-        const updatedCash = round(user.cash - accrual, 2);
-        user.cash = updatedCash;
-        await stmts.updateUserCash.run(updatedCash, position.user_id);
-        await upsertPositionState({
-            id: position.id,
-            userId: position.user_id,
-            ticker: position.ticker,
-            qty,
-            avgCost: safeNumber(position.avg_cost, 0),
-            openedAt: safeNumber(position.opened_at, now),
-            accruedBorrowCost: round(safeNumber(position.accrued_borrow_cost, 0) + accrual, 8),
-            lastBorrowAccrualAt: now,
+            const lockedUser = await stmts.getUserByIdForUpdate.getTx(client, position.user_id);
+            if (!lockedUser) return;
+
+            const lockedLastAccrualAt = safeNumber(
+                lockedPosition.last_borrow_accrual_at,
+                safeNumber(lockedPosition.opened_at, now)
+            );
+            const lockedElapsedMs = Math.max(0, now - lockedLastAccrualAt);
+            if (lockedElapsedMs < 30_000) return;
+
+            const livePriceData = engine.getPrice(position.ticker);
+            const livePrice = safeNumber(livePriceData?.price, 0);
+            if (livePrice <= 0) return;
+
+            const lockedTickerDef = engine.getTickerDef(position.ticker) || {};
+            const lockedAccrual = estimateBorrowAccrual({
+                notional: Math.abs(lockedQty) * livePrice,
+                borrow_apr_short: lockedTickerDef.borrow_apr_short,
+                elapsed_ms: lockedElapsedMs,
+                regime,
+            });
+            if (!Number.isFinite(lockedAccrual) || lockedAccrual <= 0) return;
+
+            const updatedCash = round(safeNumber(lockedUser.cash, 0) - lockedAccrual, 2);
+            await stmts.updateUserCash.runTx(client, updatedCash, position.user_id);
+            await upsertPositionState({
+                id: lockedPosition.id,
+                userId: position.user_id,
+                ticker: position.ticker,
+                qty: lockedQty,
+                avgCost: safeNumber(lockedPosition.avg_cost, 0),
+                openedAt: safeNumber(lockedPosition.opened_at, now),
+                accruedBorrowCost: round(safeNumber(lockedPosition.accrued_borrow_cost, 0) + lockedAccrual, 8),
+                lastBorrowAccrualAt: now,
+                client,
+            });
+            user.cash = updatedCash;
         });
     }
 }
@@ -354,232 +390,262 @@ async function checkTrailingStop(order, currentPrice, now) {
 }
 
 async function executeFill(order, qty, referencePrice, now, options = {}) {
-    let targetQty = Math.floor(Number(qty));
-    if (targetQty <= 0) return;
+    let result = null;
+    await runInTransaction(`matcher_execute_fill_${order.id}`, async (client) => {
+        const lockedOrder = await stmts.getOrderByIdForUpdate.getTx(client, order.id);
+        if (!lockedOrder || lockedOrder.status !== 'open') return;
 
-    const decimals = engine.getDecimals(order.ticker);
-    const user = await stmts.getUserById.get(order.user_id);
-    if (!user) return;
-    const position = await stmts.getPosition.get(order.user_id, order.ticker);
-    const currentQty = safeNumber(position?.qty, 0);
-    const currentAvg = safeNumber(position?.avg_cost, 0);
-    const baseOpenedAt = safeNumber(position?.opened_at, now);
-    const baseAccruedBorrow = safeNumber(position?.accrued_borrow_cost, 0);
-    const baseLastBorrowAccrualAt = safeNumber(position?.last_borrow_accrual_at, now);
-    const priceData = engine.getPrice(order.ticker);
-    const midPrice = safeNumber(options.midPrice, getMidPrice(priceData, referencePrice));
+        const remainingQty = Math.floor(safeNumber(lockedOrder.qty, 0) - safeNumber(lockedOrder.filled_qty, 0));
+        let targetQty = Math.min(Math.floor(Number(qty)), remainingQty);
+        if (targetQty <= 0) return;
 
-    const computeExecutionForQty = (candidateQty) => {
-        const longInventory = Math.max(0, currentQty);
-        const opensShortQty = order.side === 'sell'
-            ? Math.max(0, candidateQty - longInventory)
-            : 0;
-        let breakdown = buildExecutionBreakdown(order, candidateQty, referencePrice, midPrice, opensShortQty);
-        breakdown = applyLimitGuard(breakdown, order.side, candidateQty, midPrice, options.limitPrice);
-        breakdown.fill_price = round(breakdown.fill_price, decimals);
-        breakdown.notional = round(breakdown.fill_price * candidateQty, 8);
-        breakdown.slippage_cost = round(Math.max(0, breakdown.slippage_cost), 8);
-        breakdown.commission = round(Math.max(0, breakdown.commission), 8);
-        breakdown.borrow_cost = round(Math.max(0, breakdown.borrow_cost), 8);
-        return { opensShortQty, breakdown };
-    };
+        const decimals = engine.getDecimals(lockedOrder.ticker);
+        const user = await stmts.getUserByIdForUpdate.getTx(client, lockedOrder.user_id);
+        if (!user) return;
+        const position = await stmts.getPositionForUpdate.getTx(client, lockedOrder.user_id, lockedOrder.ticker);
+        const currentQty = safeNumber(position?.qty, 0);
+        const currentAvg = safeNumber(position?.avg_cost, 0);
+        const baseOpenedAt = safeNumber(position?.opened_at, now);
+        const baseAccruedBorrow = safeNumber(position?.accrued_borrow_cost, 0);
+        const baseLastBorrowAccrualAt = safeNumber(position?.last_borrow_accrual_at, now);
+        const priceData = engine.getPrice(lockedOrder.ticker);
+        const midPrice = safeNumber(options.midPrice, getMidPrice(priceData, referencePrice));
 
-    let execution = computeExecutionForQty(targetQty);
-    if (order.side === 'buy') {
-        while (targetQty > 0) {
-            const totalRequired = (targetQty * execution.breakdown.fill_price)
-                + execution.breakdown.commission
-                + execution.breakdown.borrow_cost;
-            if (totalRequired <= safeNumber(user.cash, 0) + 1e-6) break;
-            targetQty -= 1;
-            if (targetQty <= 0) {
-                await stmts.cancelOrder.run(now, order.id);
-                return;
+        const computeExecutionForQty = (candidateQty) => {
+            const longInventory = Math.max(0, currentQty);
+            const opensShortQty = lockedOrder.side === 'sell'
+                ? Math.max(0, candidateQty - longInventory)
+                : 0;
+            let breakdown = buildExecutionBreakdown(lockedOrder, candidateQty, referencePrice, midPrice, opensShortQty);
+            breakdown = applyLimitGuard(breakdown, lockedOrder.side, candidateQty, midPrice, options.limitPrice);
+            breakdown.fill_price = round(breakdown.fill_price, decimals);
+            breakdown.notional = round(breakdown.fill_price * candidateQty, 8);
+            breakdown.slippage_cost = round(Math.max(0, breakdown.slippage_cost), 8);
+            breakdown.commission = round(Math.max(0, breakdown.commission), 8);
+            breakdown.borrow_cost = round(Math.max(0, breakdown.borrow_cost), 8);
+            return { opensShortQty, breakdown };
+        };
+
+        let execution = computeExecutionForQty(targetQty);
+        if (lockedOrder.side === 'buy') {
+            while (targetQty > 0) {
+                const totalRequired = (targetQty * execution.breakdown.fill_price) + execution.breakdown.commission;
+                if (totalRequired <= safeNumber(user.cash, 0) + 1e-6) break;
+                targetQty -= 1;
+                if (targetQty <= 0) {
+                    await stmts.cancelOrder.runTx(client, now, lockedOrder.id);
+                    return;
+                }
+                execution = computeExecutionForQty(targetQty);
             }
-            execution = computeExecutionForQty(targetQty);
         }
-    }
 
-    const fillPrice = round(execution.breakdown.fill_price, decimals);
-    const fillTotal = round(targetQty * fillPrice, 8);
-    const commission = round(execution.breakdown.commission, 8);
-    const immediateBorrowCost = round(execution.breakdown.borrow_cost, 8);
+        const fillPrice = round(execution.breakdown.fill_price, decimals);
+        const fillTotal = round(targetQty * fillPrice, 8);
+        const commission = round(execution.breakdown.commission, 8);
 
-    const cashDelta = order.side === 'buy'
-        ? -(fillTotal + commission + immediateBorrowCost)
-        : (fillTotal - commission - immediateBorrowCost);
-    const newCash = round(safeNumber(user.cash, 0) + cashDelta, 2);
-    await stmts.updateUserCash.run(newCash, order.user_id);
+        // Borrow is accrued over elapsed time; no full-day upfront debit on open short.
+        const immediateBorrowCost = 0;
+        const cashDelta = lockedOrder.side === 'buy'
+            ? -(fillTotal + commission + immediateBorrowCost)
+            : (fillTotal - commission - immediateBorrowCost);
+        const newCash = round(safeNumber(user.cash, 0) + cashDelta, 2);
 
-    let pnl = 0;
-    let realizedBorrowFromPosition = 0;
-    let nextQty = currentQty;
-    let nextAvgCost = currentAvg;
-    let nextOpenedAt = baseOpenedAt;
-    let nextAccruedBorrow = baseAccruedBorrow;
-    let nextLastBorrowAccrualAt = baseLastBorrowAccrualAt;
-    let deletePosition = false;
+        let pnl = 0;
+        let realizedBorrowFromPosition = 0;
+        let nextQty = currentQty;
+        let nextAvgCost = currentAvg;
+        let nextOpenedAt = baseOpenedAt;
+        let nextAccruedBorrow = baseAccruedBorrow;
+        let nextLastBorrowAccrualAt = baseLastBorrowAccrualAt;
+        let deletePosition = false;
 
-    if (order.side === 'buy') {
-        if (currentQty < 0) {
-            const shortQty = Math.abs(currentQty);
-            const closedQty = Math.min(targetQty, shortQty);
-            pnl += closedQty * (currentAvg - fillPrice);
-            if (shortQty > 0 && baseAccruedBorrow > 0) {
-                realizedBorrowFromPosition = round(baseAccruedBorrow * (closedQty / shortQty), 8);
-            }
-            nextAccruedBorrow = round(Math.max(0, baseAccruedBorrow - realizedBorrowFromPosition), 8);
-            nextQty = currentQty + targetQty;
-            if (nextQty > 0) {
+        if (lockedOrder.side === 'buy') {
+            if (currentQty < 0) {
+                const shortQty = Math.abs(currentQty);
+                const closedQty = Math.min(targetQty, shortQty);
+                pnl += closedQty * (currentAvg - fillPrice);
+                if (shortQty > 0 && baseAccruedBorrow > 0) {
+                    realizedBorrowFromPosition = round(baseAccruedBorrow * (closedQty / shortQty), 8);
+                }
+                nextAccruedBorrow = round(Math.max(0, baseAccruedBorrow - realizedBorrowFromPosition), 8);
+                nextQty = currentQty + targetQty;
+                if (nextQty > 0) {
+                    nextAvgCost = fillPrice;
+                    nextOpenedAt = now;
+                    nextAccruedBorrow = 0;
+                    nextLastBorrowAccrualAt = now;
+                } else if (nextQty === 0) {
+                    deletePosition = true;
+                } else {
+                    nextAvgCost = currentAvg;
+                    nextOpenedAt = baseOpenedAt;
+                    nextLastBorrowAccrualAt = now;
+                }
+            } else if (currentQty > 0) {
+                nextQty = currentQty + targetQty;
+                nextAvgCost = nextQty !== 0
+                    ? ((currentQty * currentAvg) + (targetQty * fillPrice)) / nextQty
+                    : fillPrice;
+                nextOpenedAt = baseOpenedAt;
+                nextAccruedBorrow = 0;
+                nextLastBorrowAccrualAt = now;
+            } else {
+                nextQty = targetQty;
                 nextAvgCost = fillPrice;
                 nextOpenedAt = now;
                 nextAccruedBorrow = 0;
                 nextLastBorrowAccrualAt = now;
+            }
+        } else if (currentQty > 0) {
+            const closedQty = Math.min(targetQty, currentQty);
+            pnl += closedQty * (fillPrice - currentAvg);
+            nextQty = currentQty - targetQty;
+            if (nextQty > 0) {
+                nextAvgCost = currentAvg;
+                nextOpenedAt = baseOpenedAt;
             } else if (nextQty === 0) {
                 deletePosition = true;
             } else {
-                nextAvgCost = currentAvg;
-                nextOpenedAt = baseOpenedAt;
+                nextAvgCost = fillPrice;
+                nextOpenedAt = now;
+                nextAccruedBorrow = 0;
                 nextLastBorrowAccrualAt = now;
             }
-        } else if (currentQty > 0) {
-            nextQty = currentQty + targetQty;
-            nextAvgCost = nextQty !== 0
-                ? ((currentQty * currentAvg) + (targetQty * fillPrice)) / nextQty
+        } else if (currentQty < 0) {
+            const currentShortQty = Math.abs(currentQty);
+            nextQty = currentQty - targetQty;
+            const nextShortQty = Math.abs(nextQty);
+            nextAvgCost = nextShortQty > 0
+                ? (((currentShortQty * currentAvg) + (targetQty * fillPrice)) / nextShortQty)
                 : fillPrice;
             nextOpenedAt = baseOpenedAt;
-            nextAccruedBorrow = 0;
+            nextAccruedBorrow = baseAccruedBorrow;
             nextLastBorrowAccrualAt = now;
         } else {
-            nextQty = targetQty;
+            nextQty = -targetQty;
             nextAvgCost = fillPrice;
             nextOpenedAt = now;
             nextAccruedBorrow = 0;
             nextLastBorrowAccrualAt = now;
         }
-    } else if (currentQty > 0) {
-        const closedQty = Math.min(targetQty, currentQty);
-        pnl += closedQty * (fillPrice - currentAvg);
-        nextQty = currentQty - targetQty;
-        if (nextQty > 0) {
-            nextAvgCost = currentAvg;
-            nextOpenedAt = baseOpenedAt;
-        } else if (nextQty === 0) {
-            deletePosition = true;
+
+        const tradeBorrowCost = round(immediateBorrowCost + realizedBorrowFromPosition, 8);
+        const netPnl = round(pnl - commission - tradeBorrowCost, 8);
+
+        await stmts.updateUserCash.runTx(client, newCash, lockedOrder.user_id);
+
+        if (deletePosition || Math.abs(nextQty) < 0.0000001) {
+            await stmts.deletePosition.runTx(client, lockedOrder.user_id, lockedOrder.ticker);
         } else {
-            nextAvgCost = fillPrice;
-            nextOpenedAt = now;
-            nextAccruedBorrow = 0;
-            nextLastBorrowAccrualAt = now;
+            await upsertPositionState({
+                id: position?.id || uuid(),
+                userId: lockedOrder.user_id,
+                ticker: lockedOrder.ticker,
+                qty: round(nextQty, 8),
+                avgCost: round(nextAvgCost, 8),
+                openedAt: nextOpenedAt,
+                accruedBorrowCost: nextQty < 0 ? round(nextAccruedBorrow, 8) : 0,
+                lastBorrowAccrualAt: nextLastBorrowAccrualAt,
+                client,
+            });
         }
-    } else if (currentQty < 0) {
-        const currentShortQty = Math.abs(currentQty);
-        nextQty = currentQty - targetQty;
-        const nextShortQty = Math.abs(nextQty);
-        nextAvgCost = nextShortQty > 0
-            ? (((currentShortQty * currentAvg) + (targetQty * fillPrice)) / nextShortQty)
-            : fillPrice;
-        nextOpenedAt = baseOpenedAt;
-        nextAccruedBorrow = baseAccruedBorrow;
-        nextLastBorrowAccrualAt = now;
-    } else {
-        nextQty = -targetQty;
-        nextAvgCost = fillPrice;
-        nextOpenedAt = now;
-        nextAccruedBorrow = 0;
-        nextLastBorrowAccrualAt = now;
-    }
 
-    const tradeBorrowCost = round(immediateBorrowCost + realizedBorrowFromPosition, 8);
-    const netPnl = round(pnl - commission - tradeBorrowCost, 8);
+        const tradeId = uuid();
+        await stmts.insertTrade.runTx(
+            client,
+            tradeId,
+            lockedOrder.id,
+            lockedOrder.user_id,
+            lockedOrder.ticker,
+            lockedOrder.side,
+            targetQty,
+            fillPrice,
+            fillTotal,
+            round(netPnl, 2),
+            now,
+            round(execution.breakdown.mid_price, 8),
+            round(execution.breakdown.slippage_bps, 6),
+            round(execution.breakdown.slippage_cost, 8),
+            round(commission, 8),
+            round(tradeBorrowCost, 8),
+            round(execution.breakdown.execution_quality_score, 6),
+            execution.breakdown.regime
+        );
 
-    if (deletePosition || Math.abs(nextQty) < 0.0000001) {
-        await stmts.deletePosition.run(order.user_id, order.ticker);
-    } else {
-        await upsertPositionState({
-            id: position?.id || uuid(),
-            userId: order.user_id,
-            ticker: order.ticker,
-            qty: round(nextQty, 8),
-            avgCost: round(nextAvgCost, 8),
-            openedAt: nextOpenedAt,
-            accruedBorrowCost: nextQty < 0 ? round(nextAccruedBorrow, 8) : 0,
-            lastBorrowAccrualAt: nextLastBorrowAccrualAt,
-        });
-    }
+        const newFilledQty = safeNumber(lockedOrder.filled_qty, 0) + targetQty;
+        const status = newFilledQty >= safeNumber(lockedOrder.qty, 0) ? 'filled' : 'partial';
+        await stmts.updateOrderStatus.runTx(client, status, newFilledQty, fillPrice, now, lockedOrder.id);
 
-    const tradeId = uuid();
-    await stmts.insertTrade.run(
-        tradeId,
-        order.id,
-        order.user_id,
-        order.ticker,
-        order.side,
-        targetQty,
-        fillPrice,
-        fillTotal,
-        round(netPnl, 2),
-        now,
-        round(execution.breakdown.mid_price, 8),
-        round(execution.breakdown.slippage_bps, 6),
-        round(execution.breakdown.slippage_cost, 8),
-        round(commission, 8),
-        round(tradeBorrowCost, 8),
-        round(execution.breakdown.execution_quality_score, 6),
-        execution.breakdown.regime
-    );
+        if (lockedOrder.oco_id) {
+            await stmts.cancelOcoOrders.runTx(client, now, lockedOrder.oco_id, lockedOrder.id);
+        }
 
-    const newFilledQty = order.filled_qty + targetQty;
-    const status = newFilledQty >= order.qty ? 'filled' : 'partial';
-    await stmts.updateOrderStatus.run(status, newFilledQty, fillPrice, now, order.id);
+        result = {
+            userId: lockedOrder.user_id,
+            orderId: lockedOrder.id,
+            tradeId,
+            ticker: lockedOrder.ticker,
+            side: lockedOrder.side,
+            qty: targetQty,
+            fillPrice,
+            fillTotal,
+            commission,
+            tradeBorrowCost,
+            slippage_bps: execution.breakdown.slippage_bps,
+            slippage_cost: execution.breakdown.slippage_cost,
+            execution_quality_score: execution.breakdown.execution_quality_score,
+            netPnl,
+            regime: execution.breakdown.regime,
+            mid_price: execution.breakdown.mid_price,
+        };
+    });
 
-    if (order.oco_id) {
-        await stmts.cancelOcoOrders.run(now, order.oco_id, order.id);
-    }
+    if (!result) return;
 
-    engine.addOrderFlowImpact(order.ticker, order.side, fillTotal);
+    engine.addOrderFlowImpact(result.ticker, result.side, result.fillTotal);
     recordFillMetrics({
         timestamp: now,
-        slippage_bps: execution.breakdown.slippage_bps,
-        execution_quality_score: execution.breakdown.execution_quality_score,
+        slippage_bps: result.slippage_bps,
+        execution_quality_score: result.execution_quality_score,
     });
     if (DEBUG_EXECUTION_DIAGNOSTICS) {
         console.debug('[ExecutionDiagnostics]', {
-            user_id: order.user_id,
-            order_id: order.id,
-            ticker: order.ticker,
-            side: order.side,
-            qty: targetQty,
-            fill_price: fillPrice,
-            mid_price: round(execution.breakdown.mid_price, 8),
-            slippage_bps: round(execution.breakdown.slippage_bps, 6),
-            slippage_cost: round(execution.breakdown.slippage_cost, 8),
-            commission: round(commission, 8),
-            borrow_cost: round(tradeBorrowCost, 8),
-            execution_quality_score: round(execution.breakdown.execution_quality_score, 6),
-            regime: execution.breakdown.regime,
+            user_id: result.userId,
+            order_id: result.orderId,
+            ticker: result.ticker,
+            side: result.side,
+            qty: result.qty,
+            fill_price: result.fillPrice,
+            mid_price: round(result.mid_price, 8),
+            slippage_bps: round(result.slippage_bps, 6),
+            slippage_cost: round(result.slippage_cost, 8),
+            commission: round(result.commission, 8),
+            borrow_cost: round(result.tradeBorrowCost, 8),
+            execution_quality_score: round(result.execution_quality_score, 6),
+            regime: result.regime,
         });
     }
 
     if (fillCallback) {
-        fillCallback(order.user_id, {
+        fillCallback(result.userId, {
             type: 'fill',
-            orderId: order.id,
-            tradeId,
-            ticker: order.ticker,
-            side: order.side,
-            qty: targetQty,
-            price: fillPrice,
-            total: round(fillTotal, 2),
-            fee: round(commission + tradeBorrowCost, 2),
-            commission: round(commission, 2),
-            borrow_cost: round(tradeBorrowCost, 2),
-            slippage_bps: round(execution.breakdown.slippage_bps, 4),
-            slippage_cost: round(execution.breakdown.slippage_cost, 2),
-            execution_quality_score: round(execution.breakdown.execution_quality_score, 2),
-            net_pnl_effect: round(netPnl, 2),
-            regime: execution.breakdown.regime,
-            pnl: round(netPnl, 2),
+            orderId: result.orderId,
+            tradeId: result.tradeId,
+            ticker: result.ticker,
+            side: result.side,
+            qty: result.qty,
+            price: result.fillPrice,
+            total: round(result.fillTotal, 2),
+            fee: round(result.commission + result.tradeBorrowCost, 2),
+            commission: round(result.commission, 2),
+            borrow_cost: round(result.tradeBorrowCost, 2),
+            slippage_bps: round(result.slippage_bps, 4),
+            slippage_cost: round(result.slippage_cost, 2),
+            execution_quality_score: round(result.execution_quality_score, 2),
+            net_pnl_effect: round(result.netPnl, 2),
+            regime: result.regime,
+            pnl: round(result.netPnl, 2),
             timestamp: now,
         });
     }
@@ -615,71 +681,99 @@ async function checkMarginCalls(now) {
 
         if (portfolioValue >= totalShortExposure * 1.1) continue;
 
-        let userCash = user.cash;
         for (const shortPosition of shortPositions) {
-            const coverQty = Math.abs(shortPosition.qty);
-            const priceData = engine.getPrice(shortPosition.ticker);
-            const referencePrice = priceData?.ask;
-            if (!referencePrice) continue;
+            let liquidation = null;
+            await runInTransaction(`matcher_margin_call_${user.id}_${shortPosition.ticker}_${now}`, async (client) => {
+                const lockedUser = await stmts.getUserByIdForUpdate.getTx(client, user.id);
+                if (!lockedUser) return;
+                const lockedPosition = await stmts.getPositionForUpdate.getTx(client, user.id, shortPosition.ticker);
+                if (!lockedPosition) return;
 
-            const execution = buildExecutionBreakdown(
-                { side: 'buy', ticker: shortPosition.ticker },
-                coverQty,
-                referencePrice,
-                getMidPrice(priceData, referencePrice),
-                0
-            );
-            const coverPrice = round(execution.fill_price, engine.getDecimals(shortPosition.ticker));
-            const coverTotal = round(coverQty * coverPrice, 8);
-            const commission = round(execution.commission, 8);
-            const immediateBorrowCost = round(execution.borrow_cost, 8);
-            const accruedBorrow = round(safeNumber(shortPosition.accrued_borrow_cost, 0), 8);
-            const tradeBorrowCost = round(immediateBorrowCost + accruedBorrow, 8);
-            const pnl = round(
-                ((shortPosition.avg_cost - coverPrice) * coverQty) - commission - tradeBorrowCost,
-                8
-            );
-            userCash = round(userCash - coverTotal - commission - immediateBorrowCost, 2);
+                const lockedQty = safeNumber(lockedPosition.qty, 0);
+                if (lockedQty >= 0) return;
 
-            await stmts.updateUserCash.run(userCash, user.id);
-            await stmts.deletePosition.run(user.id, shortPosition.ticker);
+                const coverQty = Math.abs(lockedQty);
+                const priceData = engine.getPrice(shortPosition.ticker);
+                const referencePrice = priceData?.ask;
+                if (!referencePrice) return;
 
-            const tradeId = uuid();
-            await stmts.insertTrade.run(
-                tradeId,
-                'margin-call',
-                user.id,
-                shortPosition.ticker,
-                'buy',
-                coverQty,
-                coverPrice,
-                coverTotal,
-                +pnl.toFixed(2),
-                now,
-                round(execution.mid_price, 8),
-                round(execution.slippage_bps, 6),
-                round(execution.slippage_cost, 8),
-                round(commission, 8),
-                round(tradeBorrowCost, 8),
-                round(execution.execution_quality_score, 6),
-                execution.regime
-            );
+                const execution = buildExecutionBreakdown(
+                    { side: 'buy', ticker: shortPosition.ticker },
+                    coverQty,
+                    referencePrice,
+                    getMidPrice(priceData, referencePrice),
+                    0
+                );
+                const coverPrice = round(execution.fill_price, engine.getDecimals(shortPosition.ticker));
+                const coverTotal = round(coverQty * coverPrice, 8);
+                const commission = round(execution.commission, 8);
+                // Borrow is charged via elapsed accrual, not a one-day upfront debit.
+                const immediateBorrowCost = 0;
+                const accruedBorrow = round(safeNumber(lockedPosition.accrued_borrow_cost, 0), 8);
+                const tradeBorrowCost = round(immediateBorrowCost + accruedBorrow, 8);
+                const pnl = round(
+                    ((safeNumber(lockedPosition.avg_cost, 0) - coverPrice) * coverQty) - commission - tradeBorrowCost,
+                    8
+                );
+                const nextCash = round(
+                    safeNumber(lockedUser.cash, 0) - coverTotal - commission - immediateBorrowCost,
+                    2
+                );
+
+                await stmts.updateUserCash.runTx(client, nextCash, user.id);
+                await stmts.deletePosition.runTx(client, user.id, shortPosition.ticker);
+
+                const tradeId = uuid();
+                await stmts.insertTrade.runTx(
+                    client,
+                    tradeId,
+                    'margin-call',
+                    user.id,
+                    shortPosition.ticker,
+                    'buy',
+                    coverQty,
+                    coverPrice,
+                    coverTotal,
+                    +pnl.toFixed(2),
+                    now,
+                    round(execution.mid_price, 8),
+                    round(execution.slippage_bps, 6),
+                    round(execution.slippage_cost, 8),
+                    round(commission, 8),
+                    round(tradeBorrowCost, 8),
+                    round(execution.execution_quality_score, 6),
+                    execution.regime
+                );
+                liquidation = {
+                    ticker: shortPosition.ticker,
+                    qty: coverQty,
+                    price: coverPrice,
+                    commission,
+                    tradeBorrowCost,
+                    slippage_bps: execution.slippage_bps,
+                    pnl,
+                    execution_quality_score: execution.execution_quality_score,
+                };
+            });
+
+            if (!liquidation) continue;
+
             recordFillMetrics({
                 timestamp: now,
-                slippage_bps: execution.slippage_bps,
-                execution_quality_score: execution.execution_quality_score,
+                slippage_bps: liquidation.slippage_bps,
+                execution_quality_score: liquidation.execution_quality_score,
             });
 
             if (fillCallback) {
                 fillCallback(user.id, {
                     type: 'margin_call',
-                    ticker: shortPosition.ticker,
-                    qty: coverQty,
-                    price: coverPrice,
-                    commission: round(commission, 2),
-                    borrow_cost: round(tradeBorrowCost, 2),
-                    slippage_bps: round(execution.slippage_bps, 4),
-                    pnl: +pnl.toFixed(2),
+                    ticker: liquidation.ticker,
+                    qty: liquidation.qty,
+                    price: liquidation.price,
+                    commission: round(liquidation.commission, 2),
+                    borrow_cost: round(liquidation.tradeBorrowCost, 2),
+                    slippage_bps: round(liquidation.slippage_bps, 4),
+                    pnl: +liquidation.pnl.toFixed(2),
                     timestamp: now,
                 });
             }

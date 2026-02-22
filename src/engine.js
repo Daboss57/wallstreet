@@ -42,6 +42,7 @@ const MARKET_VOL_MIN_FACTOR = boundedFloat(process.env.MARKET_VOL_MIN_FACTOR, 0.
 const MARKET_VOL_MAX_FACTOR = boundedFloat(process.env.MARKET_VOL_MAX_FACTOR, 1.75, 0.2, 10.0);
 const MARKET_NEWS_VOL_SPIKE_MULTIPLIER = boundedFloat(process.env.MARKET_NEWS_VOL_SPIKE_MULTIPLIER, 1.35, 1.0, 5.0);
 const MARKET_MIN_PRICE_FACTOR = boundedFloat(process.env.MARKET_MIN_PRICE_FACTOR, 0.55, 0.05, 2.0);
+const MARKET_HARD_MIN_PRICE_FACTOR = boundedFloat(process.env.MARKET_HARD_MIN_PRICE_FACTOR, 0.12, 0.01, 1.0);
 const MARKET_MAX_PRICE_FACTOR = boundedFloat(process.env.MARKET_MAX_PRICE_FACTOR, 1.85, 1.0, 10.0);
 const MARKET_MAX_TICK_MOVE_PCT = boundedFloat(process.env.MARKET_MAX_TICK_MOVE_PCT, 0.0035, 0.0005, 0.05);
 const MARKET_MAX_NEWS_MOVE_PCT = boundedFloat(process.env.MARKET_MAX_NEWS_MOVE_PCT, 0.025, 0.002, 0.3);
@@ -69,10 +70,17 @@ function getVolatilityRange(definition) {
     };
 }
 
-function getPriceBounds(definition) {
+function getPriceBounds(definition, anchorPrice = null) {
     const risk = getRiskMultiplier(definition);
+    const staticMin = definition.basePrice * MARKET_MIN_PRICE_FACTOR / risk;
+    const dynamicAnchor = Number.isFinite(Number(anchorPrice)) && Number(anchorPrice) > 0
+        ? Number(anchorPrice)
+        : definition.basePrice;
+    // Let lower bound drift downward with persistent moves, but keep a hard crash floor.
+    const adaptiveMin = Math.min(staticMin, dynamicAnchor * MARKET_MIN_PRICE_FACTOR / risk);
+    const hardMin = definition.basePrice * MARKET_HARD_MIN_PRICE_FACTOR / risk;
     return {
-        minPrice: Math.max(0.01, definition.basePrice * MARKET_MIN_PRICE_FACTOR / risk),
+        minPrice: Math.max(0.01, hardMin, adaptiveMin),
         maxPrice: definition.basePrice * MARKET_MAX_PRICE_FACTOR * risk,
     };
 }
@@ -458,6 +466,7 @@ let tickInFlight = false;
 let lastDbWriteErrorLogAt = 0;
 let nextRegimeTransitionAt = 0;
 let forcedEventShockUntil = 0;
+let currentSessionDayKey = null;
 let currentRegime = {
     ...REGIME_PROFILES.normal,
     id: null,
@@ -471,6 +480,36 @@ function gaussianRandom() {
     while (u === 0) u = Math.random();
     while (v === 0) v = Math.random();
     return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+function getUtcDayKey(ts = Date.now()) {
+    const d = new Date(ts);
+    const year = d.getUTCFullYear();
+    const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function rolloverSession(now = Date.now()) {
+    const dayKey = getUtcDayKey(now);
+    if (!currentSessionDayKey) {
+        currentSessionDayKey = dayKey;
+        return;
+    }
+    if (dayKey === currentSessionDayKey) return;
+
+    for (const ticker of TICKER_LIST) {
+        const state = prices[ticker];
+        if (!state) continue;
+        const price = Number(state.price || 0);
+        if (!Number.isFinite(price) || price <= 0) continue;
+        state.prevClose = price;
+        state.open = price;
+        state.high = price;
+        state.low = price;
+        state.volume = 0;
+    }
+    currentSessionDayKey = dayKey;
 }
 
 // ─── Initialize prices ────────────────────────────────────────────────────────
@@ -487,6 +526,7 @@ async function initPrices() {
     for (const s of saved) savedMap[s.ticker] = s;
 
     const now = Date.now();
+    currentSessionDayKey = getUtcDayKey(now);
     for (const ticker of TICKER_LIST) {
         const def = TICKERS[ticker];
         const volRange = getVolatilityRange(def);
@@ -508,6 +548,18 @@ async function initPrices() {
                 anchorPrice: clampedPrice,
                 lastReturn: 0,
             };
+            const restoredPrevClose = Number(prices[ticker].prevClose || clampedPrice);
+            const restoredGapPct = restoredPrevClose > 0
+                ? Math.abs((clampedPrice - restoredPrevClose) / restoredPrevClose)
+                : 0;
+            const savedDayKey = getUtcDayKey(Number(s.updated_at || now));
+            if (savedDayKey !== currentSessionDayKey || restoredGapPct >= 0.35) {
+                prices[ticker].prevClose = clampedPrice;
+                prices[ticker].open = clampedPrice;
+                prices[ticker].high = clampedPrice;
+                prices[ticker].low = clampedPrice;
+                prices[ticker].volume = 0;
+            }
         } else {
             // Fresh start — small random offset from base
             const startPrice = def.basePrice * (1 + (Math.random() - 0.5) * 0.02);
@@ -678,6 +730,7 @@ async function tick() {
     if (paused) return [];
 
     const now = Date.now();
+    rolloverSession(now);
     tickCount++;
     const tickData = [];
     const candlesToSave = [];
@@ -690,7 +743,7 @@ async function tick() {
         const def = TICKERS[ticker];
         const style = TICKER_STYLES[ticker] || DEFAULT_TICKER_STYLE;
         const volRange = getVolatilityRange(def);
-        const priceBounds = getPriceBounds(def);
+        const priceBounds = getPriceBounds(def, state.anchorPrice);
         const state = prices[ticker];
         const oldPrice = state.price;
         const sessionVolMult = getSessionVolMultiplier(def, now);
@@ -884,7 +937,7 @@ function applyNewsShock(ticker, impactPct) {
     if (!state) return;
     const def = TICKERS[ticker];
     const boundedImpactPct = clamp(impactPct, -getMaxNewsMovePct(def), getMaxNewsMovePct(def));
-    const bounds = getPriceBounds(def);
+    const bounds = getPriceBounds(def, state.anchorPrice);
     state.price = clamp(state.price * (1 + boundedImpactPct), bounds.minPrice, bounds.maxPrice);
     // Spike volatility
     const volRange = getVolatilityRange(def);

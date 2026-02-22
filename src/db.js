@@ -292,9 +292,11 @@ const SQL = {
     insertUser: 'INSERT INTO users (id, username, password_hash, cash, starting_cash) VALUES ($1, $2, $3, $4, $5)',
     getUserByUsername: 'SELECT * FROM users WHERE username = $1',
     getUserById: 'SELECT id, username, cash, starting_cash, role, created_at FROM users WHERE id = $1',
+    getUserByIdForUpdate: 'SELECT id, username, cash, starting_cash, role, created_at FROM users WHERE id = $1 FOR UPDATE',
     updateUserCash: 'UPDATE users SET cash = $1 WHERE id = $2',
     getAllUsers: 'SELECT id, username, cash, starting_cash, role, created_at FROM users',
     getPosition: 'SELECT * FROM positions WHERE user_id = $1 AND ticker = $2',
+    getPositionForUpdate: 'SELECT * FROM positions WHERE user_id = $1 AND ticker = $2 FOR UPDATE',
     getUserPositions: 'SELECT * FROM positions WHERE user_id = $1',
     getAllPositions: 'SELECT * FROM positions',
     upsertPosition: `
@@ -321,6 +323,7 @@ const SQL = {
     cancelOrder: "UPDATE orders SET status = 'cancelled', cancelled_at = $1 WHERE id = $2",
     cancelOcoOrders: "UPDATE orders SET status = 'cancelled', cancelled_at = $1 WHERE oco_id = $2 AND id != $3 AND status = 'open'",
     getOrderById: 'SELECT * FROM orders WHERE id = $1',
+    getOrderByIdForUpdate: 'SELECT * FROM orders WHERE id = $1 FOR UPDATE',
     insertTrade: `
         INSERT INTO trades (
             id, order_id, user_id, ticker, side, qty, price, total, pnl, executed_at,
@@ -542,6 +545,15 @@ function makeStatement(name, sql) {
         run: (...params) => queryRun(`${name}.run`, sql, params),
         get: (...params) => queryGet(`${name}.get`, sql, params),
         all: (...params) => queryAll(`${name}.all`, sql, params),
+        runTx: async (client, ...params) => client.query(sql, params),
+        getTx: async (client, ...params) => {
+            const result = await client.query(sql, params);
+            return result.rows[0] || null;
+        },
+        allTx: async (client, ...params) => {
+            const result = await client.query(sql, params);
+            return result.rows;
+        },
     };
 }
 
@@ -549,9 +561,11 @@ const stmts = {
     insertUser: makeStatement('insertUser', SQL.insertUser),
     getUserByUsername: makeStatement('getUserByUsername', SQL.getUserByUsername),
     getUserById: makeStatement('getUserById', SQL.getUserById),
+    getUserByIdForUpdate: makeStatement('getUserByIdForUpdate', SQL.getUserByIdForUpdate),
     updateUserCash: makeStatement('updateUserCash', SQL.updateUserCash),
     getAllUsers: makeStatement('getAllUsers', SQL.getAllUsers),
     getPosition: makeStatement('getPosition', SQL.getPosition),
+    getPositionForUpdate: makeStatement('getPositionForUpdate', SQL.getPositionForUpdate),
     getUserPositions: makeStatement('getUserPositions', SQL.getUserPositions),
     getAllPositions: makeStatement('getAllPositions', SQL.getAllPositions),
     upsertPosition: makeStatement('upsertPosition', SQL.upsertPosition),
@@ -565,6 +579,7 @@ const stmts = {
     cancelOrder: makeStatement('cancelOrder', SQL.cancelOrder),
     cancelOcoOrders: makeStatement('cancelOcoOrders', SQL.cancelOcoOrders),
     getOrderById: makeStatement('getOrderById', SQL.getOrderById),
+    getOrderByIdForUpdate: makeStatement('getOrderByIdForUpdate', SQL.getOrderByIdForUpdate),
     insertTrade: makeStatement('insertTrade', SQL.insertTrade),
     getUserTrades: makeStatement('getUserTrades', SQL.getUserTrades),
     getAllTrades: makeStatement('getAllTrades', SQL.getAllTrades),
