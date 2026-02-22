@@ -109,15 +109,30 @@ const Funds = {
     return this.renderFundsList();
   },
 
+  isManagerRole(role) {
+    return role === 'owner' || role === 'analyst';
+  },
+
+  getManageableFunds() {
+    return this.myFunds.filter(fund => this.isManagerRole(fund.role));
+  },
+
   // ─── Funds List ──────────────────────────────────────────────────────────────
   renderFundsList() {
+    const manageableFunds = this.getManageableFunds();
+    const hasClientOnlyFunds = this.myFunds.length > 0 && manageableFunds.length === 0;
+
+    if (hasClientOnlyFunds) {
+      return this.renderRestrictedState();
+    }
+
     return `
       <div class="funds-header">
         <h1>🏦 Hedge Funds</h1>
         <p class="page-subtitle">Create and manage collaborative trading funds</p>
       </div>
 
-      ${this.myFunds.length > 0 ? `
+      ${manageableFunds.length > 0 ? `
       <div class="funds-actions">
         <button class="btn-primary" onclick="Funds.showCreateFundModal()">
           + Create New Fund
@@ -125,7 +140,18 @@ const Funds = {
       </div>
       ` : ''}
 
-      ${this.myFunds.length === 0 ? this.renderEmptyState() : this.renderFundsGrid()}
+      ${manageableFunds.length === 0 ? this.renderEmptyState() : this.renderFundsGrid(manageableFunds)}
+    `;
+  },
+
+  renderRestrictedState() {
+    return `
+      <div class="funds-empty-state">
+        <div class="empty-icon">🔒</div>
+        <h3>Manager Access Required</h3>
+        <p>You need an analyst or owner role to access hedge fund management.</p>
+        <button class="btn-secondary" onclick="window.location.hash='#/client-portal'">Go to My Portal</button>
+      </div>
     `;
   },
 
@@ -140,10 +166,10 @@ const Funds = {
     `;
   },
 
-  renderFundsGrid() {
+  renderFundsGrid(funds = this.myFunds) {
     return `
       <div class="funds-grid">
-        ${this.myFunds.map(fund => this.renderFundCard(fund)).join('')}
+        ${funds.map(fund => this.renderFundCard(fund)).join('')}
       </div>
     `;
   },
@@ -783,6 +809,12 @@ const Funds = {
 
   // ─── Navigation ──────────────────────────────────────────────────────────────
   async viewFund(fundId) {
+    const myFund = this.myFunds.find(f => f.id === fundId);
+    if (!myFund || !this.isManagerRole(myFund.role)) {
+      Utils.showToast('error', 'Access Denied', 'Only analysts and owners can open fund management.');
+      window.location.hash = '#/client-portal';
+      return;
+    }
     await this.loadFundDetails(fundId);
     this.currentTab = 'overview';
     this.updateContent();

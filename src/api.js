@@ -399,6 +399,24 @@ function requireFundMember(req, res, next) {
     })().catch(next);
 }
 
+function hasFundManagerAccess(membership) {
+    return Boolean(membership && (membership.role === 'owner' || membership.role === 'analyst'));
+}
+
+function requireFundAnalyst(req, res, next) {
+    (async () => {
+        const { id } = req.params;
+        const { fund, membership } = await getFundWithMembership(id, req.user.id);
+        if (!fund) return res.status(404).json({ error: 'Fund not found' });
+        if (!hasFundManagerAccess(membership)) {
+            return res.status(403).json({ error: 'Analyst or owner access required' });
+        }
+        req.fund = fund;
+        req.membership = membership;
+        next();
+    })().catch(next);
+}
+
 function requireFundOwner(req, res, next) {
     (async () => {
         const { id } = req.params;
@@ -614,13 +632,7 @@ router.delete('/funds/:id', authenticate, requireFundOwner, asyncRoute(async (re
 // ============================================================
 
 // Add member to fund (owner/analyst only)
-router.post('/funds/:id/members', authenticate, requireFundMember, asyncRoute(async (req, res) => {
-    const { role } = req.membership;
-
-    if (role !== 'owner' && role !== 'analyst') {
-        return res.status(403).json({ error: 'Only owners and analysts can add members' });
-    }
-
+router.post('/funds/:id/members', authenticate, requireFundAnalyst, asyncRoute(async (req, res) => {
     const { username, role: newRole } = req.body;
 
     if (!username || !newRole) {
@@ -653,8 +665,8 @@ router.post('/funds/:id/members', authenticate, requireFundMember, asyncRoute(as
     res.status(201).json({ success: true, member: newMember });
 }));
 
-// List fund members (fund members only)
-router.get('/funds/:id/members', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+// List fund members (analyst/owner only)
+router.get('/funds/:id/members', authenticate, requireFundAnalyst, asyncRoute(async (req, res) => {
     const members = await stmts.getFundMembers.all(req.params.id);
     res.json(members);
 }));
@@ -709,8 +721,8 @@ router.delete('/funds/:id/members/:userId', authenticate, requireFundOwner, asyn
 // FUND CAPITAL ENDPOINTS
 // ============================================================
 
-// Deposit/withdraw capital (auth required)
-router.post('/funds/:id/capital', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+// Deposit/withdraw capital (analyst/owner only)
+router.post('/funds/:id/capital', authenticate, requireFundAnalyst, asyncRoute(async (req, res) => {
     const { amount: rawAmount, type } = req.body;
     const parsedAmount = Number(rawAmount);
 
@@ -849,14 +861,14 @@ router.post('/funds/:id/capital', authenticate, requireFundMember, asyncRoute(as
     });
 }));
 
-// Get capital transactions (fund members only)
-router.get('/funds/:id/capital', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+// Get capital transactions (analyst/owner only)
+router.get('/funds/:id/capital', authenticate, requireFundAnalyst, asyncRoute(async (req, res) => {
     const transactions = await stmts.getFundCapitalTransactions.all(req.params.id);
     res.json(transactions);
 }));
 
-// Get capital summary by user (fund members only)
-router.get('/funds/:id/capital/summary', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+// Get capital summary by user (analyst/owner only)
+router.get('/funds/:id/capital/summary', authenticate, requireFundAnalyst, asyncRoute(async (req, res) => {
     const summary = await stmts.getFundCapitalSummary.all(req.params.id, 'deposit');
     res.json(summary);
 }));
@@ -925,8 +937,8 @@ router.get('/funds/:id/nav', authenticate, requireFundMember, asyncRoute(async (
     });
 }));
 
-// Investor unit ledger (fund members only)
-router.get('/funds/:id/investors', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+// Investor unit ledger (analyst/owner only)
+router.get('/funds/:id/investors', authenticate, requireFundAnalyst, asyncRoute(async (req, res) => {
     const fundId = req.params.id;
     const [navState, investorsRaw] = await Promise.all([
         getFundNavState(fundId),
@@ -963,8 +975,8 @@ router.get('/funds/:id/investors', authenticate, requireFundMember, asyncRoute(a
 // FUND RISK ENDPOINTS
 // ============================================================
 
-// Get risk settings + utilization snapshot (fund members only)
-router.get('/funds/:id/risk', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+// Get risk settings + utilization snapshot (analyst/owner only)
+router.get('/funds/:id/risk', authenticate, requireFundAnalyst, asyncRoute(async (req, res) => {
     const [settingsRow, snapshot, breaches] = await Promise.all([
         stmts.getFundRiskSettings.get(req.params.id),
         strategyRunner.getFundRiskSnapshot(req.params.id),
@@ -1005,8 +1017,8 @@ router.put('/funds/:id/risk', authenticate, requireFundOwner, asyncRoute(async (
     res.json({ success: true, settings, utilization: snapshot });
 }));
 
-// Get risk breaches (fund members only)
-router.get('/funds/:id/risk/breaches', authenticate, requireFundMember, asyncRoute(async (req, res) => {
+// Get risk breaches (analyst/owner only)
+router.get('/funds/:id/risk/breaches', authenticate, requireFundAnalyst, asyncRoute(async (req, res) => {
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
     const breaches = await stmts.getFundRiskBreaches.all(req.params.id, limit);
     res.json(breaches);
@@ -1020,8 +1032,8 @@ router.get('/funds/:id/risk/breaches', authenticate, requireFundMember, asyncRou
 router.get('/funds/:fundId/strategies', authenticate, asyncRoute(async (req, res) => {
     const { fundId } = req.params;
     const membership = await stmts.getFundMember.get(fundId, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
     const strategies = (await stmts.getStrategiesByFund.all(fundId))
         .filter((strategy) => strategy.type !== 'custom');
@@ -1041,8 +1053,8 @@ router.post('/funds/:fundId/strategies', authenticate, asyncRoute(async (req, re
     const { name, type, config } = req.body;
 
     const membership = await stmts.getFundMember.get(fundId, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     if (!name || !type) {
@@ -1080,8 +1092,8 @@ router.get('/strategies/:id', authenticate, asyncRoute(async (req, res) => {
     }
 
     const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     const latest = await stmts.getLatestStrategyBacktest.get(strategy.id);
@@ -1096,8 +1108,8 @@ router.get('/funds/:fundId/dashboard', authenticate, asyncRoute(async (req, res)
     const { fundId } = req.params;
 
     const membership = await stmts.getFundMember.get(fundId, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     const strategies = await stmts.getStrategiesByFund.all(fundId);
@@ -1113,8 +1125,8 @@ router.get('/strategies/:id/trades', authenticate, asyncRoute(async (req, res) =
     }
 
     const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     const trades = await stmts.getStrategyTrades.all(strategy.id, 100);
@@ -1129,8 +1141,8 @@ router.post('/strategies/:id/backtest', authenticate, asyncRoute(async (req, res
     }
 
     const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     const bars = Math.min(Math.max(Number.parseInt(req.body?.bars, 10) || 500, 100), 2000);
@@ -1170,8 +1182,8 @@ router.get('/strategies/:id/backtests', authenticate, asyncRoute(async (req, res
     }
 
     const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 20, 1), 200);
@@ -1189,8 +1201,8 @@ router.put('/strategies/:id', authenticate, asyncRoute(async (req, res) => {
     }
 
     const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     if (type) {
@@ -1222,8 +1234,8 @@ router.delete('/strategies/:id', authenticate, asyncRoute(async (req, res) => {
     }
 
     const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     await stmts.deleteStrategyBacktests.run(req.params.id);
@@ -1239,8 +1251,8 @@ router.post('/strategies/:id/start', authenticate, asyncRoute(async (req, res) =
     }
 
     const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     if (strategy.is_active) {
@@ -1287,8 +1299,8 @@ router.post('/strategies/:id/stop', authenticate, asyncRoute(async (req, res) =>
     }
 
     const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     if (!strategy.is_active) {
@@ -1392,8 +1404,8 @@ router.get('/custom-strategies/:id', authenticate, asyncRoute(async (req, res) =
     }
 
     const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     res.json(strategy);
@@ -1404,8 +1416,8 @@ router.get('/funds/:fundId/custom-strategies', authenticate, asyncRoute(async (r
     const { fundId } = req.params;
 
     const membership = await stmts.getFundMember.get(fundId, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     const strategies = await stmts.getCustomStrategiesByFund.all(fundId);
@@ -1505,8 +1517,8 @@ router.post('/custom-strategies/:id/test', authenticate, asyncRoute(async (req, 
     }
 
     const membership = await stmts.getFundMember.get(strategy.fund_id, req.user.id);
-    if (!membership) {
-        return res.status(403).json({ error: 'Not a member of this fund' });
+    if (!hasFundManagerAccess(membership)) {
+        return res.status(403).json({ error: 'Analyst or owner access required' });
     }
 
     const { test_data } = req.body;

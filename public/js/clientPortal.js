@@ -10,7 +10,6 @@ const ClientPortal = {
     navData: null,
     performance: null,
     transactions: [],
-    strategies: [],
     fundSummary: null,
     chart: null,
 
@@ -129,17 +128,6 @@ const ClientPortal = {
                         <div class="cp-performance-stats">
                             ${this.renderPerformanceStats()}
                         </div>
-                    </div>
-                </div>
-
-                <!-- Strategies List -->
-                <div class="cp-card cp-strategies-card">
-                    <div class="cp-card-header">
-                        <h3><i class="fa-solid fa-chess"></i> Strategies</h3>
-                        <span class="cp-badge">${this.strategies.active_count || 0} active</span>
-                    </div>
-                    <div class="cp-card-body">
-                        ${this.renderStrategiesContent()}
                     </div>
                 </div>
 
@@ -284,48 +272,6 @@ const ClientPortal = {
         `;
     },
 
-    renderStrategiesContent() {
-        if (!this.strategies || !this.strategies.strategies) {
-            return '<div class="loading-spinner"></div>';
-        }
-
-        const strategies = this.strategies.strategies;
-
-        if (strategies.length === 0) {
-            return `
-                <div class="cp-empty-state">
-                    <i class="fa-solid fa-chess-board"></i>
-                    <p>No strategies configured</p>
-                </div>
-            `;
-        }
-
-        return `
-            <div class="cp-strategies-list">
-                ${strategies.map(s => {
-                    const returnClass = parseFloat(s.return_pct) >= 0 ? 'positive' : 'negative';
-                    const returnSign = parseFloat(s.return_pct) >= 0 ? '+' : '';
-                    const statusClass = s.is_active ? 'active' : 'inactive';
-                    const statusText = s.is_active ? 'Active' : 'Inactive';
-
-                    return `
-                        <div class="cp-strategy-item">
-                            <div class="cp-strategy-info">
-                                <span class="cp-strategy-name">${s.name}</span>
-                                <span class="cp-strategy-type">${s.type.replace('_', ' ')}</span>
-                            </div>
-                            <div class="cp-strategy-meta">
-                                <span class="cp-strategy-status ${statusClass}">${statusText}</span>
-                                <span class="cp-strategy-return ${returnClass}">${returnSign}${s.return_pct}%</span>
-                            </div>
-                            <div class="cp-strategy-desc">${s.description}</div>
-                        </div>
-                    `;
-                }).join('')}
-            </div>
-        `;
-    },
-
     renderTransactionsContent() {
         if (!this.transactions || !this.transactions.transactions) {
             return '<div class="loading-spinner"></div>';
@@ -391,12 +337,11 @@ const ClientPortal = {
         const params = `?fund_id=${fundId}`;
 
         try {
-            const [allocation, navData, performance, transactions, strategies, fundSummary] = await Promise.all([
+            const [allocation, navData, performance, transactions, fundSummary] = await Promise.all([
                 Utils.get(`/client-portal/allocation${params}`).catch(() => null),
                 Utils.get(`/funds/${fundId}/nav`).catch(() => null),
                 Utils.get(`/client-portal/performance${params}`).catch(() => null),
                 Utils.get(`/client-portal/transactions${params}`).catch(() => ({ transactions: [] })),
-                Utils.get(`/client-portal/strategies${params}`).catch(() => ({ strategies: [] })),
                 Utils.get(`/client-portal/fund-summary${params}`).catch(() => null),
             ]);
 
@@ -404,7 +349,6 @@ const ClientPortal = {
             this.navData = navData;
             this.performance = performance;
             this.transactions = transactions;
-            this.strategies = strategies;
             this.fundSummary = fundSummary;
         } catch (e) {
             console.error('Failed to load client portal data:', e);
