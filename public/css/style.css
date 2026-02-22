@@ -3763,6 +3763,79 @@ select {
   margin-top: 12px;
 }
 
+/* Statements Card */
+.cp-statements-card {
+  grid-column: 1 / -1;
+}
+
+.cp-statement-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.cp-statement-pill {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px;
+}
+
+.cp-statement-pill-label {
+  display: block;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 4px;
+}
+
+.cp-statement-pill-value {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.cp-statement-pill-value.positive {
+  color: var(--green);
+}
+
+.cp-statement-pill-value.negative {
+  color: var(--red);
+}
+
+.cp-statements-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.cp-statements-wrap {
+  overflow-x: auto;
+}
+
+.cp-statements-table th {
+  text-align: left;
+  padding: 10px 10px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.cp-statements-table td {
+  padding: 10px 10px;
+  border-bottom: 1px solid rgba(30, 41, 59, 0.35);
+  font-size: 0.82rem;
+  font-family: var(--font-mono);
+}
+
+.cp-statements-table tr:hover td {
+  background: var(--bg-hover);
+}
+
 /* Empty State */
 .cp-empty-state {
   text-align: center;
@@ -3837,6 +3910,7 @@ select {
   .cp-summary-card,
   .cp-chart-card,
   .cp-strategies-card,
+  .cp-statements-card,
   .cp-transactions-card {
     grid-column: 1;
   }
@@ -3868,5 +3942,9 @@ select {
 
   .cp-strategies-list {
     grid-template-columns: 1fr;
+  }
+
+  .cp-statements-table {
+    font-size: 0.74rem;
   }
 }

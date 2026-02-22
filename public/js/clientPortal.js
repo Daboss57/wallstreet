@@ -10,6 +10,7 @@ const ClientPortal = {
     navData: null,
     performance: null,
     transactions: [],
+    statements: null,
     fundSummary: null,
     chart: null,
 
@@ -138,6 +139,16 @@ const ClientPortal = {
                     </div>
                     <div class="cp-card-body">
                         ${this.renderTransactionsContent()}
+                    </div>
+                </div>
+
+                <!-- Monthly Statements -->
+                <div class="cp-card cp-statements-card">
+                    <div class="cp-card-header">
+                        <h3><i class="fa-solid fa-file-invoice-dollar"></i> Monthly Statements</h3>
+                    </div>
+                    <div class="cp-card-body">
+                        ${this.renderStatementsContent()}
                     </div>
                 </div>
             </div>
@@ -316,6 +327,93 @@ const ClientPortal = {
         `;
     },
 
+    renderStatementsContent() {
+        if (!this.statements) {
+            return '<div class="loading-spinner"></div>';
+        }
+
+        const rows = this.statements.statements || [];
+        const summary = this.statements.summary || {};
+        const pnlClass = Number(summary.since_inception_pnl || 0) >= 0 ? 'positive' : 'negative';
+        const returnClass = Number(summary.since_inception_return_pct || 0) >= 0 ? 'positive' : 'negative';
+        const pnlSign = Number(summary.since_inception_pnl || 0) >= 0 ? '+' : '';
+        const returnSign = Number(summary.since_inception_return_pct || 0) >= 0 ? '+' : '';
+
+        if (rows.length === 0) {
+            return `
+                <div class="cp-empty-state">
+                    <i class="fa-solid fa-file-circle-xmark"></i>
+                    <p>No monthly statement data yet</p>
+                </div>
+            `;
+        }
+
+        return `
+            <div class="cp-statement-summary">
+                <div class="cp-statement-pill">
+                    <span class="cp-statement-pill-label">Net Contributed</span>
+                    <span class="cp-statement-pill-value">${Utils.money(summary.net_contributed || 0)}</span>
+                </div>
+                <div class="cp-statement-pill">
+                    <span class="cp-statement-pill-label">Current Value</span>
+                    <span class="cp-statement-pill-value">${Utils.money(summary.current_value || 0)}</span>
+                </div>
+                <div class="cp-statement-pill">
+                    <span class="cp-statement-pill-label">Since Inception P&L</span>
+                    <span class="cp-statement-pill-value ${pnlClass}">${pnlSign}${Utils.money(summary.since_inception_pnl || 0)}</span>
+                </div>
+                <div class="cp-statement-pill">
+                    <span class="cp-statement-pill-label">Since Inception Return</span>
+                    <span class="cp-statement-pill-value ${returnClass}">${returnSign}${Utils.num(summary.since_inception_return_pct || 0, 2)}%</span>
+                </div>
+                <div class="cp-statement-pill">
+                    <span class="cp-statement-pill-label">Est. Total Fees</span>
+                    <span class="cp-statement-pill-value">${Utils.money(summary.total_estimated_fees || 0)}</span>
+                </div>
+            </div>
+
+            <div class="cp-statements-wrap">
+                <table class="cp-statements-table">
+                    <thead>
+                        <tr>
+                            <th>Month</th>
+                            <th>Opening Value</th>
+                            <th>Net Flows</th>
+                            <th>Gross P&L</th>
+                            <th>Est. Fees</th>
+                            <th>Net P&L</th>
+                            <th>Ending Value</th>
+                            <th>Return</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows.map((row) => {
+                            const grossClass = Number(row.gross_pnl || 0) >= 0 ? 'positive' : 'negative';
+                            const netClass = Number(row.net_pnl_after_fees || 0) >= 0 ? 'positive' : 'negative';
+                            const returnClassRow = Number(row.net_return_pct || 0) >= 0 ? 'positive' : 'negative';
+                            const grossSign = Number(row.gross_pnl || 0) >= 0 ? '+' : '';
+                            const netSign = Number(row.net_pnl_after_fees || 0) >= 0 ? '+' : '';
+                            const returnSignRow = Number(row.net_return_pct || 0) >= 0 ? '+' : '';
+                            return `
+                                <tr>
+                                    <td>${row.month_label}</td>
+                                    <td>${Utils.money(row.opening_value || 0)}</td>
+                                    <td>${Utils.money(row.net_flows || 0)}</td>
+                                    <td class="${grossClass}">${grossSign}${Utils.money(row.gross_pnl || 0)}</td>
+                                    <td>${Utils.money(row.estimated_total_fees || 0)}</td>
+                                    <td class="${netClass}">${netSign}${Utils.money(row.net_pnl_after_fees || 0)}</td>
+                                    <td>${Utils.money(row.closing_value || 0)}</td>
+                                    <td class="${returnClassRow}">${returnSignRow}${Utils.num(row.net_return_pct || 0, 2)}%</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            </div>
+            <p class="cp-table-note">Values are estimated from monthly NAV snapshots and your unit ledger.</p>
+        `;
+    },
+
     // Data loading methods
     async loadClientFunds() {
         try {
@@ -337,11 +435,12 @@ const ClientPortal = {
         const params = `?fund_id=${fundId}`;
 
         try {
-            const [allocation, navData, performance, transactions, fundSummary] = await Promise.all([
+            const [allocation, navData, performance, transactions, statements, fundSummary] = await Promise.all([
                 Utils.get(`/client-portal/allocation${params}`).catch(() => null),
                 Utils.get(`/funds/${fundId}/nav`).catch(() => null),
                 Utils.get(`/client-portal/performance${params}`).catch(() => null),
                 Utils.get(`/client-portal/transactions${params}`).catch(() => ({ transactions: [] })),
+                Utils.get(`/client-portal/statements${params}`).catch(() => ({ statements: [], summary: null })),
                 Utils.get(`/client-portal/fund-summary${params}`).catch(() => null),
             ]);
 
@@ -349,6 +448,7 @@ const ClientPortal = {
             this.navData = navData;
             this.performance = performance;
             this.transactions = transactions;
+            this.statements = statements;
             this.fundSummary = fundSummary;
         } catch (e) {
             console.error('Failed to load client portal data:', e);

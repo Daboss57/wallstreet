@@ -328,9 +328,250 @@ router.get('/fund-summary', asyncRoute(async (req, res) => {
     });
 }));
 
+/**
+ * GET /api/client-portal/statements
+ * Returns monthly investor statements based on unit + NAV history.
+ */
+router.get('/statements', asyncRoute(async (req, res) => {
+    const userId = req.user.id;
+    const fundId = req.fund.id;
+    const now = Date.now();
+    const maxMonths = Math.min(Math.max(parseInt(req.query.months, 10) || 12, 1), 36);
+
+    const [transactionsRaw, snapshotsRaw] = await Promise.all([
+        stmts.getUserCapitalInFund.all(fundId, userId),
+        stmts.getFundNavSnapshots.all(fundId, 2000),
+    ]);
+
+    const transactions = (transactionsRaw || [])
+        .map((tx) => {
+            const amount = Number(tx.amount || 0);
+            const inferredUnits = tx.type === 'deposit' ? amount : -amount;
+            return {
+                createdAt: Number(tx.created_at || 0),
+                amount,
+                type: tx.type,
+                unitsDelta: Number(tx.units_delta ?? inferredUnits ?? 0),
+            };
+        })
+        .filter((tx) => Number.isFinite(tx.createdAt) && tx.createdAt > 0)
+        .sort((a, b) => a.createdAt - b.createdAt);
+
+    const snapshots = (snapshotsRaw || [])
+        .map((s) => ({
+            snapshotAt: Number(s.snapshot_at || 0),
+            navPerUnit: Number(s.nav_per_unit || 1),
+        }))
+        .filter((s) => Number.isFinite(s.snapshotAt) && s.snapshotAt > 0)
+        .sort((a, b) => a.snapshotAt - b.snapshotAt);
+
+    if (transactions.length === 0 && snapshots.length === 0) {
+        return res.json({
+            fund_id: fundId,
+            fund_name: req.fund.name,
+            as_of: now,
+            statements: [],
+            summary: {
+                net_contributed: 0,
+                current_value: 0,
+                since_inception_pnl: 0,
+                since_inception_return_pct: 0,
+                total_estimated_fees: 0,
+            },
+        });
+    }
+
+    const firstDataTs = Math.min(
+        transactions.length ? transactions[0].createdAt : now,
+        snapshots.length ? snapshots[0].snapshotAt : now
+    );
+
+    const currentMonthStart = getUtcMonthStart(now);
+    const minMonthStart = getUtcMonthStart(firstDataTs);
+    const monthStarts = [];
+    for (let monthStart = currentMonthStart; monthStart >= minMonthStart; monthStart = shiftUtcMonth(monthStart, -1)) {
+        monthStarts.push(monthStart);
+    }
+    monthStarts.reverse();
+
+    const managementFeeAnnual = Number(req.fund.management_fee || 0);
+    const performanceFeeRate = Number(req.fund.performance_fee || 0);
+
+    const statements = [];
+    for (const monthStart of monthStarts) {
+        const monthEnd = getUtcMonthEnd(monthStart);
+        const openingTs = monthStart - 1;
+
+        const openingUnits = cumulativeUnitsAt(transactions, openingTs);
+        const closingUnits = cumulativeUnitsAt(transactions, monthEnd);
+
+        const openingNavPerUnit = latestNavPerUnitAt(snapshots, openingTs);
+        const closingNavPerUnit = latestNavPerUnitAt(snapshots, monthEnd);
+
+        const openingValue = openingUnits * openingNavPerUnit;
+        const closingValue = closingUnits * closingNavPerUnit;
+
+        let subscriptions = 0;
+        let redemptions = 0;
+        let unitsSubscribed = 0;
+        let unitsRedeemed = 0;
+        for (const tx of transactions) {
+            if (tx.createdAt < monthStart || tx.createdAt > monthEnd) continue;
+            if (tx.type === 'deposit') {
+                subscriptions += tx.amount;
+                unitsSubscribed += tx.unitsDelta;
+            } else {
+                redemptions += tx.amount;
+                unitsRedeemed += Math.abs(tx.unitsDelta);
+            }
+        }
+
+        const netFlows = subscriptions - redemptions;
+        const grossPnl = closingValue - openingValue - netFlows;
+        const avgCapital = openingValue + (netFlows / 2);
+        const estimatedMgmtFee = avgCapital > 0 ? (avgCapital * managementFeeAnnual) / 12 : 0;
+        const estimatedPerfFee = grossPnl > 0 ? grossPnl * performanceFeeRate : 0;
+        const estimatedFees = estimatedMgmtFee + estimatedPerfFee;
+        const netPnlAfterFees = grossPnl - estimatedFees;
+        const netReturnPct = avgCapital !== 0 ? (netPnlAfterFees / avgCapital) * 100 : 0;
+
+        const hasActivity = (
+            Math.abs(openingUnits) > 1e-9
+            || Math.abs(closingUnits) > 1e-9
+            || Math.abs(subscriptions) > 1e-9
+            || Math.abs(redemptions) > 1e-9
+        );
+        if (!hasActivity) continue;
+
+        statements.push({
+            month_key: formatMonthKey(monthStart),
+            month_label: formatMonthLabel(monthStart),
+            opening_units: round8(openingUnits),
+            opening_nav_per_unit: round8(openingNavPerUnit),
+            opening_value: round2(openingValue),
+            subscriptions: round2(subscriptions),
+            redemptions: round2(redemptions),
+            net_flows: round2(netFlows),
+            units_subscribed: round8(unitsSubscribed),
+            units_redeemed: round8(unitsRedeemed),
+            closing_units: round8(closingUnits),
+            closing_nav_per_unit: round8(closingNavPerUnit),
+            closing_value: round2(closingValue),
+            gross_pnl: round2(grossPnl),
+            estimated_management_fee: round2(estimatedMgmtFee),
+            estimated_performance_fee: round2(estimatedPerfFee),
+            estimated_total_fees: round2(estimatedFees),
+            net_pnl_after_fees: round2(netPnlAfterFees),
+            net_return_pct: round4(netReturnPct),
+        });
+    }
+
+    const latestStatement = statements[statements.length - 1];
+    const netContributed = round2(
+        transactions.reduce((sum, tx) => sum + (tx.type === 'deposit' ? tx.amount : -tx.amount), 0)
+    );
+    const currentUnits = cumulativeUnitsAt(transactions, now);
+    const currentNavPerUnit = latestNavPerUnitAt(snapshots, now);
+    const currentValue = round2(currentUnits * currentNavPerUnit);
+    const sinceInceptionPnl = round2(currentValue - netContributed);
+    const totalEstimatedFees = round2(
+        statements.reduce((sum, row) => sum + row.estimated_total_fees, 0)
+    );
+    const sinceInceptionReturnPct = netContributed !== 0
+        ? round4((sinceInceptionPnl / netContributed) * 100)
+        : 0;
+
+    res.json({
+        fund_id: fundId,
+        fund_name: req.fund.name,
+        as_of: latestStatement ? getUtcMonthEnd(parseMonthKeyToUtcMonthStart(latestStatement.month_key)) : now,
+        statements: statements.slice(-maxMonths).reverse(),
+        summary: {
+            net_contributed: netContributed,
+            current_value: currentValue,
+            since_inception_pnl: sinceInceptionPnl,
+            since_inception_return_pct: sinceInceptionReturnPct,
+            total_estimated_fees: totalEstimatedFees,
+        },
+        assumptions: {
+            management_fee_annual_rate: managementFeeAnnual,
+            performance_fee_rate: performanceFeeRate,
+            notes: [
+                'Management fee is estimated monthly using average capital for the month.',
+                'Performance fee is estimated on positive monthly gross P&L.',
+            ],
+        },
+    });
+}));
+
 // ============================================================
 // HELPER FUNCTIONS
 // ============================================================
+
+function round2(value) {
+    return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function round4(value) {
+    return Math.round((Number(value || 0) + Number.EPSILON) * 10000) / 10000;
+}
+
+function round8(value) {
+    return Math.round((Number(value || 0) + Number.EPSILON) * 1e8) / 1e8;
+}
+
+function getUtcMonthStart(timestamp) {
+    const d = new Date(Number(timestamp));
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0);
+}
+
+function shiftUtcMonth(monthStartTimestamp, deltaMonths) {
+    const d = new Date(Number(monthStartTimestamp));
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + deltaMonths, 1, 0, 0, 0, 0);
+}
+
+function getUtcMonthEnd(monthStartTimestamp) {
+    return shiftUtcMonth(monthStartTimestamp, 1) - 1;
+}
+
+function formatMonthKey(monthStartTimestamp) {
+    const d = new Date(Number(monthStartTimestamp));
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    return `${y}-${m}`;
+}
+
+function formatMonthLabel(monthStartTimestamp) {
+    const d = new Date(Number(monthStartTimestamp));
+    return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+}
+
+function parseMonthKeyToUtcMonthStart(monthKey) {
+    if (typeof monthKey !== 'string' || !/^\d{4}-\d{2}$/.test(monthKey)) {
+        return getUtcMonthStart(Date.now());
+    }
+    const [yearRaw, monthRaw] = monthKey.split('-');
+    const year = Number(yearRaw);
+    const monthIndex = Number(monthRaw) - 1;
+    return Date.UTC(year, monthIndex, 1, 0, 0, 0, 0);
+}
+
+function cumulativeUnitsAt(transactions, timestamp) {
+    let total = 0;
+    for (const tx of transactions) {
+        if (tx.createdAt <= timestamp) total += Number(tx.unitsDelta || 0);
+    }
+    return total;
+}
+
+function latestNavPerUnitAt(snapshots, timestamp) {
+    let navPerUnit = 1;
+    for (const s of snapshots) {
+        if (s.snapshotAt <= timestamp) navPerUnit = Number(s.navPerUnit || 1);
+        else break;
+    }
+    return navPerUnit;
+}
 
 /**
  * Calculate simulated fund return based on strategy type
