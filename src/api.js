@@ -6,6 +6,7 @@ const engine = require('./engine');
 const orderbook = require('./orderbook');
 const strategyRunner = require('./strategyRunner');
 const backtester = require('./backtester');
+const clientPortal = require('./routes/clientPortal');
 
 const router = express.Router();
 const MIN_ORDER_NOTIONAL = Math.max(1, Number.parseFloat(process.env.MIN_ORDER_NOTIONAL || '50'));
@@ -1566,5 +1567,7 @@ router.post('/admin/reset-portfolios', authenticate, asyncRoute(async (req, res)
 
     res.json({ success: true, message: 'All portfolios have been reset' });
 }));
+
+router.use('/client-portal', clientPortal);
 
 module.exports = router;

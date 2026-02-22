@@ -77,6 +77,7 @@ const Terminal = {
             <a href="#/markets" class="${activeClass('#/markets')}">Markets</a>
             <a href="#/portfolio" class="${activeClass('#/portfolio')}">Portfolio</a>
             <a href="#/funds" class="${activeClass('#/funds')}">Funds</a>
+            <a href="#/client-portal" class="${activeClass('#/client-portal')}">My Portal</a>
             <a href="#/account" class="${activeClass('#/account')}">Account</a>
             <a href="#/leaderboard" class="${activeClass('#/leaderboard')}">Leaderboard</a>
             <a href="#/news" class="${activeClass('#/news')}">News</a>
