@@ -1944,12 +1944,16 @@ const Funds = {
               <div class="bb-pnl-value">${s.totalTrades}</div>
             </div>
             <div class="bb-pnl-item">
+              <div class="bb-pnl-label">FILLS</div>
+              <div class="bb-pnl-value">${s.totalFills || 0}</div>
+            </div>
+            <div class="bb-pnl-item">
               <div class="bb-pnl-label">WIN RATE</div>
               <div class="bb-pnl-value ${s.winRate >= 50 ? 'bb-green' : s.winRate > 0 ? 'bb-amber' : ''}">${s.winRate}%</div>
             </div>
             <div class="bb-pnl-item">
-              <div class="bb-pnl-label">W / L</div>
-              <div class="bb-pnl-value"><span class="bb-green">${s.wins}</span> / <span class="bb-red">${s.losses}</span></div>
+              <div class="bb-pnl-label">W / L / B</div>
+              <div class="bb-pnl-value"><span class="bb-green">${s.wins}</span> / <span class="bb-red">${s.losses}</span> / <span class="bb-dim">${s.breakevens || 0}</span></div>
             </div>
           </div>
         </div>
@@ -2046,6 +2050,7 @@ const Funds = {
         ${strategies.map(s => {
       const totalPnl = s.realizedPnl + s.unrealizedPnl;
       const pnlClass = totalPnl >= 0 ? 'bb-green' : 'bb-red';
+      const fillCount = Number(s.fillCount || 0);
       const winRate = (s.winCount + s.lossCount) > 0
         ? ((s.winCount / (s.winCount + s.lossCount)) * 100).toFixed(0) : '—';
       const typeIcon = this.STRATEGY_TYPES[s.type]?.icon || '📊';
@@ -2057,9 +2062,9 @@ const Funds = {
               </div>
               <div class="bb-strat-metrics">
                 <div><span class="bb-dim">P&L</span> <span class="${pnlClass}">${this.bbMoney(totalPnl)}</span></div>
-                <div><span class="bb-dim">Trades</span> <span>${s.tradeCount}</span></div>
+                <div><span class="bb-dim">Closed/Fills</span> <span>${s.tradeCount}/${fillCount}</span></div>
                 <div><span class="bb-dim">Win%</span> <span>${winRate}%</span></div>
-                <div><span class="bb-dim">Signal</span> <span class="${s.lastSignal === 'buy' ? 'bb-green' : s.lastSignal === 'sell' ? 'bb-red' : 'bb-dim'}">${(s.lastSignal || '—').toUpperCase()}</span></div>
+                <div><span class="bb-dim">W/L/B</span> <span><span class="bb-green">${s.winCount}</span>/<span class="bb-red">${s.lossCount}</span>/<span class="bb-dim">${s.breakevenCount || 0}</span></span></div>
               </div>
               ${s.lastRunAt ? `<div class="bb-strat-time">Last run: ${Utils.timeAgo(s.lastRunAt)}</div>` : ''}
             </div>

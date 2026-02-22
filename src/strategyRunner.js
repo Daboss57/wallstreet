@@ -375,6 +375,7 @@ function getOrCreateState(strategyId) {
             tradeCount: 0,
             winCount: 0,
             lossCount: 0,
+            breakevenCount: 0,
             lastSignal: null,
             lastRunAt: 0,
         });
@@ -676,7 +677,9 @@ function updatePosition(state, ticker, side, qty, price) {
             const closedQty = Math.min(qty, Math.abs(pos.qty));
             const pnl = closedQty * (pos.avgEntry - price);
             state.realizedPnl += pnl;
-            if (pnl > 0) state.winCount++; else state.lossCount++;
+            if (pnl > 0) state.winCount++;
+            else if (pnl < 0) state.lossCount++;
+            else state.breakevenCount = Number(state.breakevenCount || 0) + 1;
             pos.qty += closedQty;
             const remaining = qty - closedQty;
             if (remaining > 0) {
@@ -703,7 +706,9 @@ function updatePosition(state, ticker, side, qty, price) {
             const closedQty = Math.min(qty, pos.qty);
             const pnl = closedQty * (price - pos.avgEntry);
             state.realizedPnl += pnl;
-            if (pnl > 0) state.winCount++; else state.lossCount++;
+            if (pnl > 0) state.winCount++;
+            else if (pnl < 0) state.lossCount++;
+            else state.breakevenCount = Number(state.breakevenCount || 0) + 1;
             pos.qty -= closedQty;
             const remaining = qty - closedQty;
             if (remaining > 0) {
@@ -788,9 +793,11 @@ function setPaused(value) {
 function getDashboardData(fundId, strategies) {
     let totalRealized = 0;
     let totalUnrealized = 0;
-    let totalTrades = 0;
+    let totalClosedTrades = 0;
+    let totalFills = 0;
     let totalWins = 0;
     let totalLosses = 0;
+    let totalBreakevens = 0;
     const allTrades = [];
     const allPositions = [];
     const allSignals = [];
@@ -801,7 +808,7 @@ function getDashboardData(fundId, strategies) {
         if (!state) {
             perStrategy.push({
                 id: s.id, name: s.name, type: s.type, is_active: s.is_active,
-                tradeCount: 0, winCount: 0, lossCount: 0, realizedPnl: 0,
+                tradeCount: 0, fillCount: 0, winCount: 0, lossCount: 0, breakevenCount: 0, realizedPnl: 0,
                 unrealizedPnl: 0, lastSignal: null, lastRunAt: 0,
             });
             continue;
@@ -825,11 +832,19 @@ function getDashboardData(fundId, strategies) {
             }
         }
 
+        const strategyWins = Number(state.winCount || 0);
+        const strategyLosses = Number(state.lossCount || 0);
+        const strategyBreakevens = Number(state.breakevenCount || 0);
+        const strategyClosedTrades = strategyWins + strategyLosses + strategyBreakevens;
+        const strategyFills = Number(state.tradeCount || 0);
+
         totalRealized += state.realizedPnl;
         totalUnrealized += stratUnrealized;
-        totalTrades += state.tradeCount;
-        totalWins += state.winCount;
-        totalLosses += state.lossCount;
+        totalClosedTrades += strategyClosedTrades;
+        totalFills += strategyFills;
+        totalWins += strategyWins;
+        totalLosses += strategyLosses;
+        totalBreakevens += strategyBreakevens;
 
         // Collect trades
         for (const t of state.trades) {
@@ -843,9 +858,11 @@ function getDashboardData(fundId, strategies) {
 
         perStrategy.push({
             id: s.id, name: s.name, type: s.type, is_active: s.is_active,
-            tradeCount: state.tradeCount,
-            winCount: state.winCount,
-            lossCount: state.lossCount,
+            tradeCount: strategyClosedTrades,
+            fillCount: strategyFills,
+            winCount: strategyWins,
+            lossCount: strategyLosses,
+            breakevenCount: strategyBreakevens,
             realizedPnl: state.realizedPnl,
             unrealizedPnl: stratUnrealized,
             lastSignal: state.lastSignal,
@@ -857,17 +874,20 @@ function getDashboardData(fundId, strategies) {
     allTrades.sort((a, b) => b.executed_at - a.executed_at);
     allSignals.sort((a, b) => b.timestamp - a.timestamp);
 
-    const winRate = totalTrades > 0 ? ((totalWins / (totalWins + totalLosses)) * 100) : 0;
+    const resolvedTrades = totalWins + totalLosses;
+    const winRate = resolvedTrades > 0 ? ((totalWins / resolvedTrades) * 100) : 0;
 
     return {
         summary: {
             totalPnl: totalRealized + totalUnrealized,
             realizedPnl: totalRealized,
             unrealizedPnl: totalUnrealized,
-            totalTrades,
+            totalTrades: totalClosedTrades,
+            totalFills,
             winRate: +winRate.toFixed(1),
             wins: totalWins,
             losses: totalLosses,
+            breakevens: totalBreakevens,
         },
         trades: allTrades.slice(0, 50),
         positions: allPositions,

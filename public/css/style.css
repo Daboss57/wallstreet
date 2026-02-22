@@ -3041,7 +3041,7 @@ select {
 
 .bb-pnl-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 16px;
 }
 
