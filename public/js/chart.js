@@ -93,7 +93,17 @@ const ChartManager = {
         this.clearAllPriceLines();
 
         try {
-            const candles = await Utils.get(`/candles/${ticker}?interval=${this.currentInterval}&limit=500`);
+            const limitByInterval = {
+                '1m': 240,
+                '5m': 288,
+                '15m': 288,
+                '1h': 240,
+                '4h': 240,
+                '1D': 365,
+            };
+            const reqLimit = limitByInterval[this.currentInterval] || 300;
+            const candlesRaw = await Utils.get(`/candles/${ticker}?interval=${this.currentInterval}&limit=${reqLimit}`);
+            const candles = this.sanitizeHistory(candlesRaw || []);
 
             const candleData = [];
             const volumeData = [];
@@ -121,6 +131,33 @@ const ChartManager = {
         } catch (e) {
             console.error('[Chart] Load error:', e);
         }
+    },
+
+    sanitizeHistory(candles) {
+        if (!Array.isArray(candles) || candles.length < 80) return candles || [];
+        if (!['1m', '5m'].includes(this.currentInterval)) return candles;
+
+        const closes = candles.map((c) => Number(c.close || 0)).filter((v) => Number.isFinite(v) && v > 0);
+        if (closes.length < 80) return candles;
+        const tail = closes.slice(-120);
+        const sorted = [...tail].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)] || closes[closes.length - 1];
+        if (!Number.isFinite(median) || median <= 0) return candles;
+
+        const upper = median * 1.35;
+        const lower = median * 0.65;
+        let lastOutlierIdx = -1;
+        for (let i = 0; i < candles.length; i++) {
+            const close = Number(candles[i]?.close || 0);
+            if (!Number.isFinite(close) || close <= 0) continue;
+            if (close > upper || close < lower) lastOutlierIdx = i;
+        }
+
+        // Only trim when we still keep enough recent bars.
+        if (lastOutlierIdx >= 0 && (candles.length - (lastOutlierIdx + 1)) >= 60) {
+            return candles.slice(lastOutlierIdx + 1);
+        }
+        return candles;
     },
 
     onTicks(ticks) {
