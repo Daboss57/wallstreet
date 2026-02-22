@@ -743,8 +743,8 @@ async function tick() {
         const def = TICKERS[ticker];
         const style = TICKER_STYLES[ticker] || DEFAULT_TICKER_STYLE;
         const volRange = getVolatilityRange(def);
-        const priceBounds = getPriceBounds(def, state.anchorPrice);
         const state = prices[ticker];
+        const priceBounds = getPriceBounds(def, state.anchorPrice);
         const oldPrice = state.price;
         const sessionVolMult = getSessionVolMultiplier(def, now);
         const factorShock = getFactorShock(style);

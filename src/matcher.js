@@ -159,13 +159,12 @@ async function accrueBorrowCosts(now) {
         });
         if (!Number.isFinite(accrual) || accrual <= 0) continue;
         await runInTransaction(`matcher_borrow_accrual_${position.id || `${position.user_id}_${position.ticker}`}`, async (client) => {
+            const lockedUser = await stmts.getUserByIdForUpdate.getTx(client, position.user_id);
+            if (!lockedUser) return;
             const lockedPosition = await stmts.getPositionForUpdate.getTx(client, position.user_id, position.ticker);
             if (!lockedPosition) return;
             const lockedQty = safeNumber(lockedPosition.qty, 0);
             if (lockedQty >= 0) return;
-
-            const lockedUser = await stmts.getUserByIdForUpdate.getTx(client, position.user_id);
-            if (!lockedUser) return;
 
             const lockedLastAccrualAt = safeNumber(
                 lockedPosition.last_borrow_accrual_at,
