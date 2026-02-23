@@ -10,12 +10,18 @@ const ChartManager = {
     currentTicker: null,
     currentInterval: '1m',
     lastCandleTime: null,
+    _liveCandle: null,     // current interval candle built from tick price only
+    _tickHandler: null,    // stable listener ref for proper unsubscribe
     _priceLines: [],       // active price line references
     _positionLines: null,  // { entry, tp, sl }
     _orderLines: [],       // pending order lines
 
     init(container) {
         if (this.chart) this.chart.remove();
+        if (this._tickHandler) {
+            Utils.off('ticks', this._tickHandler);
+            this._tickHandler = null;
+        }
 
         this.chart = LightweightCharts.createChart(container, {
             width: container.clientWidth,
@@ -80,14 +86,16 @@ const ChartManager = {
         });
         this._resizeObserver.observe(container);
 
-        // Listen for ticks
-        Utils.on('ticks', (ticks) => this.onTicks(ticks));
+        // Listen for ticks with a stable handler reference so destroy() can remove it.
+        this._tickHandler = (ticks) => this.onTicks(ticks);
+        Utils.on('ticks', this._tickHandler);
     },
 
     async loadTicker(ticker, interval) {
         this.currentTicker = ticker;
         this.currentInterval = interval || this.currentInterval;
         this.lastCandleTime = null;
+        this._liveCandle = null;
 
         // Clear old price lines
         this.clearAllPriceLines();
@@ -123,6 +131,10 @@ const ChartManager = {
                     color: c.close >= c.open ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)',
                 });
                 this.lastCandleTime = time;
+            }
+            if (candleData.length > 0) {
+                const last = candleData[candleData.length - 1];
+                this._liveCandle = { ...last };
             }
 
             this.candleSeries.setData(candleData);
@@ -173,13 +185,14 @@ const ChartManager = {
             if (this.lastCandleTime && candleTime > this.lastCandleTime) {
                 // New candle
                 this.lastCandleTime = candleTime;
-                this.candleSeries.update({
+                this._liveCandle = {
                     time: candleTime,
                     open: tick.price,
                     high: tick.price,
                     low: tick.price,
                     close: tick.price,
-                });
+                };
+                this.candleSeries.update(this._liveCandle);
                 this.volumeSeries.update({
                     time: candleTime,
                     value: 0,
@@ -189,12 +202,25 @@ const ChartManager = {
                 // Update existing candle
                 const time = this.lastCandleTime || candleTime;
                 this.lastCandleTime = time;
+                if (!this._liveCandle || this._liveCandle.time !== time) {
+                    this._liveCandle = {
+                        time,
+                        open: tick.price,
+                        high: tick.price,
+                        low: tick.price,
+                        close: tick.price,
+                    };
+                } else {
+                    this._liveCandle.high = Math.max(this._liveCandle.high, tick.price);
+                    this._liveCandle.low = Math.min(this._liveCandle.low, tick.price);
+                    this._liveCandle.close = tick.price;
+                }
                 this.candleSeries.update({
                     time,
-                    open: tick.open || tick.price,
-                    high: Math.max(tick.high || tick.price, tick.price),
-                    low: Math.min(tick.low || tick.price, tick.price),
-                    close: tick.price,
+                    open: this._liveCandle.open,
+                    high: this._liveCandle.high,
+                    low: this._liveCandle.low,
+                    close: this._liveCandle.close,
                 });
             }
         }
@@ -374,7 +400,11 @@ const ChartManager = {
     destroy() {
         if (this._resizeObserver) this._resizeObserver.disconnect();
         if (this.chart) { this.chart.remove(); this.chart = null; }
-        Utils.off('ticks', this.onTicks);
+        if (this._tickHandler) {
+            Utils.off('ticks', this._tickHandler);
+            this._tickHandler = null;
+        }
+        this._liveCandle = null;
     }
 };
 
