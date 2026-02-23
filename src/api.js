@@ -1498,9 +1498,15 @@ router.delete('/strategies/:id', authenticate, asyncRoute(async (req, res) => {
     if (!hasFundManagerAccess(membership)) {
         return res.status(403).json({ error: 'Analyst or owner access required' });
     }
+    if (strategy.type === 'custom') {
+        return res.status(400).json({ error: 'Use /custom-strategies/:id to delete custom strategies' });
+    }
 
-    await stmts.deleteStrategyBacktests.run(req.params.id);
-    await stmts.deleteStrategy.run(req.params.id);
+    await runInTransaction('delete_strategy', async (client) => {
+        await client.query('DELETE FROM strategy_trades WHERE strategy_id = $1', [req.params.id]);
+        await client.query('DELETE FROM strategy_backtests WHERE strategy_id = $1', [req.params.id]);
+        await client.query('DELETE FROM strategies WHERE id = $1', [req.params.id]);
+    });
     res.json({ success: true });
 }));
 

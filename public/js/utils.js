@@ -159,10 +159,16 @@ const Utils = {
     _events: {},
     on(event, cb) {
         if (!this._events[event]) this._events[event] = [];
-        this._events[event].push(cb);
+        if (!this._events[event].includes(cb)) {
+            this._events[event].push(cb);
+        }
     },
     off(event, cb) {
         if (!this._events[event]) return;
+        if (!cb) {
+            delete this._events[event];
+            return;
+        }
         this._events[event] = this._events[event].filter(fn => fn !== cb);
     },
     emit(event, data) {

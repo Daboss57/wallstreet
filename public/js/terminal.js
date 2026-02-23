@@ -15,8 +15,18 @@ const Terminal = {
   executionEstimate: null,
   _watchlistFilter: '',
   _bottomTab: 'positions',
+  _ticksHandler: null,
+  _orderbookHandler: null,
+  _portfolioHandler: null,
+  _fillHandler: null,
 
   async render(container) {
+    // Defensive cleanup: drop any stale stream listeners from prior route lifecycles.
+    Utils.off('ticks');
+    Utils.off('orderbook');
+    Utils.off('portfolio:update');
+    Utils.off('fill');
+
     // Load tickers
     try { this.tickers = await Utils.get('/tickers'); } catch (e) { console.error(e); }
 
@@ -49,10 +59,14 @@ const Terminal = {
     this.loadPortfolioData();
 
     // Listen for real-time updates
-    Utils.on('ticks', (ticks) => this.onTicks(ticks));
-    Utils.on('orderbook', (book) => this.onOrderBook(book));
-    Utils.on('portfolio:update', (data) => this.onPortfolioUpdate(data));
-    Utils.on('fill', () => this.loadPortfolioData());
+    if (!this._ticksHandler) this._ticksHandler = (ticks) => this.onTicks(ticks);
+    if (!this._orderbookHandler) this._orderbookHandler = (book) => this.onOrderBook(book);
+    if (!this._portfolioHandler) this._portfolioHandler = (data) => this.onPortfolioUpdate(data);
+    if (!this._fillHandler) this._fillHandler = () => this.loadPortfolioData();
+    Utils.on('ticks', this._ticksHandler);
+    Utils.on('orderbook', this._orderbookHandler);
+    Utils.on('portfolio:update', this._portfolioHandler);
+    Utils.on('fill', this._fillHandler);
   },
 
   renderHeader() {
@@ -914,9 +928,10 @@ const Terminal = {
   destroy() {
     if (this._clockInterval) clearInterval(this._clockInterval);
     ChartManager.destroy();
-    Utils.off('ticks', this.onTicks);
-    Utils.off('orderbook', this.onOrderBook);
-    Utils.off('portfolio:update', this.onPortfolioUpdate);
+    if (this._ticksHandler) Utils.off('ticks', this._ticksHandler);
+    if (this._orderbookHandler) Utils.off('orderbook', this._orderbookHandler);
+    if (this._portfolioHandler) Utils.off('portfolio:update', this._portfolioHandler);
+    if (this._fillHandler) Utils.off('fill', this._fillHandler);
   }
 };
 

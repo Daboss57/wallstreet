@@ -4,6 +4,7 @@
 
 const News = {
     events: [],
+    _liveNewsHandler: null,
 
     async render(container) {
         try { this.events = await Utils.get('/news?limit=100'); } catch (e) { console.error(e); }
@@ -29,13 +30,16 @@ const News = {
         Terminal.startClock();
 
         // Listen for live news
-        Utils.on('news:live', (event) => {
-            this.events.unshift(event);
-            const list = document.getElementById('news-list');
-            if (list) {
-                list.innerHTML = this.renderEvents();
-            }
-        });
+        if (!this._liveNewsHandler) {
+            this._liveNewsHandler = (event) => {
+                this.events.unshift(event);
+                const list = document.getElementById('news-list');
+                if (list) {
+                    list.innerHTML = this.renderEvents();
+                }
+            };
+        }
+        Utils.on('news:live', this._liveNewsHandler);
     },
 
     renderEvents() {
@@ -63,7 +67,9 @@ const News = {
 
     destroy() {
         if (Terminal._clockInterval) clearInterval(Terminal._clockInterval);
-        Utils.off('news:live');
+        if (this._liveNewsHandler) {
+            Utils.off('news:live', this._liveNewsHandler);
+        }
     }
 };
 
